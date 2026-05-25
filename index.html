@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local G-code Viewer – Linear Advance K Preview</title>
+<title>Local G-code Viewer – Linear Advance K Preview + Playback</title>
 <style>
   :root{
     --bg:#0e1117;
@@ -129,6 +129,27 @@
     padding:10px 14px;
     display:grid;
     gap:9px;
+  }
+  .playbackRow button{min-width:92px}
+  .playbackRow select{padding:9px 10px}
+  .playbackState{
+    color:var(--muted);
+    font-size:13px;
+    font-weight:650;
+    min-width:88px;
+  }
+  .timeText{
+    color:var(--muted);
+    font-size:13px;
+    min-width:106px;
+    text-align:right;
+    font-variant-numeric:tabular-nums;
+  }
+  .playNote{
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.35;
+    padding-left:78px;
   }
   .row{
     display:flex;
@@ -366,6 +387,30 @@
       </div>
     </div>
     <div class="controls">
+      <div class="row playbackRow">
+        <label>Playback</label>
+        <button id="playBtn" disabled>▶ Play</button>
+        <button id="restartPlayBtn" disabled>↺ Start</button>
+        <button id="exitPlaybackBtn" disabled>Preview</button>
+        <select id="playSpeed" aria-label="Playback speed" disabled>
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1× real time</option>
+          <option value="2">2×</option>
+          <option value="5">5×</option>
+          <option value="10">10×</option>
+          <option value="25">25×</option>
+          <option value="50">50×</option>
+          <option value="100">100×</option>
+        </select>
+        <span id="playState" class="playbackState">Static preview</span>
+      </div>
+      <div class="row">
+        <label>Timeline</label>
+        <input id="playSlider" type="range" min="0" max="0" step="0.01" value="0" disabled>
+        <span id="playTime" class="timeText">0:00 / —</span>
+      </div>
+      <div class="playNote">At 1×, playback follows movement feedrates. Heating, dwell commands and acceleration delays are not timed. Current-layer mode is fastest for large files.</div>
       <div class="row">
         <label>Layer</label>
         <input id="layerSlider" type="range" min="0" max="0" value="0" disabled>
@@ -403,6 +448,13 @@
   const colorSpeed = document.getElementById('colorSpeed');
   const colorK = document.getElementById('colorK');
   const kLegend = document.getElementById('kLegend');
+  const playBtn = document.getElementById('playBtn');
+  const restartPlayBtn = document.getElementById('restartPlayBtn');
+  const exitPlaybackBtn = document.getElementById('exitPlaybackBtn');
+  const playSpeed = document.getElementById('playSpeed');
+  const playState = document.getElementById('playState');
+  const playSlider = document.getElementById('playSlider');
+  const playTime = document.getElementById('playTime');
   const searchInput = document.getElementById('searchInput');
   const searchResults = document.getElementById('searchResults');
 
@@ -411,6 +463,14 @@
   let selectedLayer = 0;
   let view = { scale: 1, ox: 0, oy: 0 };
   let dragging = false, lastMouse = null;
+  let playback = {
+    active: false,
+    playing: false,
+    timeS: 0,
+    speed: 1,
+    raf: 0,
+    lastFrameMs: 0
+  };
 
   const statsEls = {
     layers: document.getElementById('layersStat'),
@@ -445,6 +505,9 @@
   }
 
   async function parseGcode(text, fileName='loaded file') {
+    stopPlaybackLoop();
+    playback.active = false;
+    playback.timeS = 0;
     rawLines = text.split(/\r?\n/);
     const moves = [];
     const layers = [];
@@ -547,12 +610,17 @@
         }
 
         if (isMove) {
+          const rawDurationS = nf > 0 && dist > 0 ? dist / (nf / 60) : 0;
+          const durationS = Number.isFinite(rawDurationS) ? rawDurationS : 0;
           const move = {
             x1: old.x, y1: old.y, z1: old.z,
             x2: nx, y2: ny, z2: nz,
             eDelta: de,
             f: nf,
             k: currentK,
+            durationS,
+            startTimeS: estimatedSeconds,
+            endTimeS: estimatedSeconds + durationS,
             extrude: isExtrude,
             retract: isRetract,
             line: i + 1,
@@ -569,10 +637,9 @@
           }
 
           if (nf > 0 && dist > 0) {
-            const t = dist / (nf / 60);
-            if (Number.isFinite(t)) {
-              estimatedSeconds += t;
-              layers[currentLayer].timeS += t;
+            if (durationS > 0) {
+              estimatedSeconds += durationS;
+              layers[currentLayer].timeS += durationS;
             }
             minF = Math.min(minF, nf);
             maxF = Math.max(maxF, nf);
@@ -609,7 +676,11 @@
     layerSlider.disabled = false;
     layerSlider.max = Math.max(0, layers.length - 1);
     layerSlider.value = selectedLayer;
+    playback.active = false;
+    playback.timeS = 0;
+    playback.speed = Number(playSpeed.value) || 1;
     updateStats();
+    updatePlaybackControls();
     resetView();
     updateSearch();
     statusEl.textContent = fileName;
@@ -812,6 +883,181 @@
     ctx.stroke();
   }
 
+  function clockText(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`;
+  }
+
+  function stopPlaybackLoop() {
+    if (playback.raf) cancelAnimationFrame(playback.raf);
+    playback.raf = 0;
+    playback.playing = false;
+    playback.lastFrameMs = 0;
+  }
+
+  function findPlaybackMoveIndex(timeS) {
+    if (!data || !data.moves.length) return 0;
+    let low = 0;
+    let high = data.moves.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (data.moves[middle].endTimeS <= timeS + 0.000001) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  function updatePlaybackControls() {
+    const ready = !!data && data.moves.length > 0 && data.estimatedSeconds > 0;
+    playBtn.disabled = !ready;
+    restartPlayBtn.disabled = !ready;
+    playSpeed.disabled = !ready;
+    playSlider.disabled = !ready;
+    exitPlaybackBtn.disabled = !ready || !playback.active;
+    playBtn.textContent = playback.playing ? '⏸ Pause' : '▶ Play';
+    playState.textContent = !playback.active ? 'Static preview' : (playback.playing ? 'Playing' : (playback.timeS >= (data?.estimatedSeconds || 0) ? 'Complete' : 'Paused'));
+    const duration = data?.estimatedSeconds || 0;
+    playSlider.max = String(Math.max(0, duration));
+    playSlider.value = String(Math.min(duration, playback.timeS));
+    playTime.textContent = data ? `${clockText(playback.timeS)} / ${clockText(duration)}` : '0:00 / —';
+  }
+
+  function setPlaybackTime(timeS, redraw=true) {
+    if (!data) return;
+    const duration = data.estimatedSeconds || 0;
+    playback.timeS = Math.max(0, Math.min(duration, Number(timeS) || 0));
+    const index = findPlaybackMoveIndex(playback.timeS);
+    const referenceMove = data.moves[Math.min(index, data.moves.length - 1)];
+    if (referenceMove) {
+      selectedLayer = referenceMove.layer;
+      layerSlider.value = String(selectedLayer);
+      updateLayerText();
+    }
+    updatePlaybackControls();
+    if (redraw) draw();
+  }
+
+  function colourForMove(m) {
+    if (!m.extrude) return getCSS('--travel');
+    if (colorK.checked) return kColor(m.k);
+    if (colorSpeed.checked) return speedColor(m.f);
+    return getCSS('--extrude');
+  }
+
+  function drawPartialMove(m, fraction, isIso) {
+    if (m.extrude && !showExtrude.checked) return;
+    if (!m.extrude && !showTravel.checked) return;
+    const amount = Math.max(0, Math.min(1, fraction));
+    const partial = {
+      ...m,
+      x2: m.x1 + (m.x2 - m.x1) * amount,
+      y2: m.y1 + (m.y2 - m.y1) * amount,
+      z2: m.z1 + (m.z2 - m.z1) * amount
+    };
+    ctx.save();
+    ctx.globalAlpha = m.extrude ? 1 : 0.42;
+    ctx.lineWidth = m.extrude ? Math.max(1.4, Math.min(3.8, view.scale * 0.055)) : 1;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    drawSingleMove(partial, colourForMove(m), isIso);
+    ctx.restore();
+  }
+
+  function drawNozzleMarker(x, y, z, isIso, k) {
+    const p = isIso ? isoToScreen(x, y, z) : worldToScreen(x, y);
+    ctx.save();
+    ctx.fillStyle = colorK.checked ? kColor(k) : getCSS('--accent');
+    ctx.strokeStyle = '#08111a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(p[0], p[1], 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPlayback(isIso) {
+    const index = findPlaybackMoveIndex(playback.timeS);
+    const completedAll = data.moves.slice(0, index);
+    const current = data.moves[index];
+    let completed = completedAll;
+
+    if (mode.value === 'layer') {
+      completed = completedAll.filter(m => m.layer === selectedLayer);
+    } else if (mode.value === 'upToLayer') {
+      completed = completedAll.filter(m => m.layer <= selectedLayer);
+    }
+
+    if (completed.length) drawMoves(completed, 1, isIso);
+
+    if (current && current.durationS > 0 && playback.timeS >= current.startTimeS) {
+      const fraction = (playback.timeS - current.startTimeS) / current.durationS;
+      drawPartialMove(current, fraction, isIso);
+      drawNozzleMarker(
+        current.x1 + (current.x2 - current.x1) * fraction,
+        current.y1 + (current.y2 - current.y1) * fraction,
+        current.z1 + (current.z2 - current.z1) * fraction,
+        isIso,
+        current.k
+      );
+    } else if (completedAll.length) {
+      const last = completedAll[completedAll.length - 1];
+      drawNozzleMarker(last.x2, last.y2, last.z2, isIso, last.k);
+    } else if (current) {
+      drawNozzleMarker(current.x1, current.y1, current.z1, isIso, current.k);
+    }
+  }
+
+  function playbackFrame(nowMs) {
+    if (!playback.playing || !data) return;
+    const deltaS = Math.max(0, (nowMs - playback.lastFrameMs) / 1000);
+    playback.lastFrameMs = nowMs;
+    setPlaybackTime(playback.timeS + deltaS * playback.speed, true);
+    if (playback.timeS >= data.estimatedSeconds) {
+      stopPlaybackLoop();
+      updatePlaybackControls();
+      draw();
+      return;
+    }
+    playback.raf = requestAnimationFrame(playbackFrame);
+  }
+
+  function togglePlayback() {
+    if (!data || data.estimatedSeconds <= 0) return;
+    if (playback.playing) {
+      stopPlaybackLoop();
+      updatePlaybackControls();
+      draw();
+      return;
+    }
+    playback.active = true;
+    if (playback.timeS >= data.estimatedSeconds) playback.timeS = 0;
+    playback.speed = Number(playSpeed.value) || 1;
+    setPlaybackTime(playback.timeS, false);
+    playback.playing = true;
+    playback.lastFrameMs = performance.now();
+    updatePlaybackControls();
+    draw();
+    playback.raf = requestAnimationFrame(playbackFrame);
+  }
+
+  function restartPlayback() {
+    if (!data) return;
+    stopPlaybackLoop();
+    playback.active = true;
+    setPlaybackTime(0, true);
+  }
+
+  function exitPlayback() {
+    stopPlaybackLoop();
+    playback.active = false;
+    updatePlaybackControls();
+    draw();
+  }
+
   function draw() {
     const r = wrap.getBoundingClientRect();
     ctx.clearRect(0, 0, r.width, r.height);
@@ -819,7 +1065,9 @@
 
     if (mode.value !== 'iso') drawGrid();
 
-    if (mode.value === 'all') {
+    if (playback.active) {
+      drawPlayback(mode.value === 'iso');
+    } else if (mode.value === 'all') {
       drawMoves(data.moves, 1, false);
     } else if (mode.value === 'upToLayer') {
       for (let i = 0; i <= selectedLayer; i++) {
@@ -840,12 +1088,11 @@
 
   function drawOverlay() {
     if (!data) return;
-    const r = wrap.getBoundingClientRect();
     ctx.save();
     ctx.fillStyle = 'rgba(10,15,24,.68)';
     ctx.strokeStyle = 'rgba(125,211,252,.18)';
     ctx.lineWidth = 1;
-    roundRect(ctx, 14, 14, 270, 72, 12);
+    roundRect(ctx, 14, 14, 302, playback.active ? 92 : 72, 12);
     ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#e8eef9';
     ctx.font = '700 13px system-ui, sans-serif';
@@ -856,11 +1103,17 @@
     const visibleK = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
     const kSummary = visibleK.length ? `  |  K ${visibleK.map(formatK).join(', ')}` : '';
     ctx.fillText(`Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves${kSummary}`, 28, 58);
-    ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 76);
+    if (playback.active) {
+      const state = playback.playing ? 'PLAYING' : (playback.timeS >= data.estimatedSeconds ? 'COMPLETE' : 'PAUSED');
+      ctx.fillText(`${state}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×`, 28, 76);
+      ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 94);
+    } else {
+      ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 76);
+    }
     ctx.restore();
   }
 
-  function roundRect(ctx, x, y, w, h, r) {
+    function roundRect(ctx, x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x+r,y);
     ctx.arcTo(x+w,y,x+w,y+h,r);
@@ -946,7 +1199,21 @@
   fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
   sampleBtn.addEventListener('click', loadSample);
   resetBtn.addEventListener('click', resetView);
+  playBtn.addEventListener('click', togglePlayback);
+  restartPlayBtn.addEventListener('click', restartPlayback);
+  exitPlaybackBtn.addEventListener('click', exitPlayback);
+  playSpeed.addEventListener('change', () => {
+    playback.speed = Number(playSpeed.value) || 1;
+    updatePlaybackControls();
+    draw();
+  });
+  playSlider.addEventListener('input', e => {
+    stopPlaybackLoop();
+    playback.active = true;
+    setPlaybackTime(Number(e.target.value), true);
+  });
   layerSlider.addEventListener('input', e => {
+    if (playback.active) exitPlayback();
     selectedLayer = Number(e.target.value);
     updateLayerText();
     draw();
