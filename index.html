@@ -512,7 +512,7 @@
         <code>M900 K…</code> values as a smooth colour ramp. This is designed for height-varying
         K scripts that insert a new K value on each layer. Choose a palette above, and use
         <strong>All layers</strong> or <strong>3D-ish preview</strong> to see the gradient through the print.
-        Playback can also simulate Marlin-style acceleration and Classic Jerk timing.
+        Playback can also simulate Marlin-style acceleration and Classic Jerk timing. In <strong>3D-ish preview</strong>, the printer origin <code>(0,0,0)</code> is oriented at the front/lower-left, with +X to the right and +Y towards the rear.
         Enable <strong>Realistic extrusion line thickness</strong> to draw extrusion moves at an estimated physical width based on extrusion amount, move length, layer height and 1.75&nbsp;mm filament unless <code>M200 D…</code> specifies another diameter.
       </div>
     </div>
@@ -1204,28 +1204,66 @@
     layerText.textContent = `${selectedLayer + 1} / ${data.layers.length}${z}${k}`;
   }
 
+  // 3D-ish view orientation: the printer's front-left build-plate origin remains
+  // at the lower-left of the projected bed. +X runs right, +Y runs back/up,
+  // and +Z rises vertically on screen.
+  const ISO_Y_SKEW_X = 0.40;
+  const ISO_Y_SKEW_Y = 0.40;
+  const ISO_Z_LIFT = 4.5;
+
+  function projectTop(x, y) {
+    return { x, y: -y };
+  }
+
+  function projectIso(x, y, z) {
+    return {
+      x: x + y * ISO_Y_SKEW_X,
+      y: -y * ISO_Y_SKEW_Y - z * ISO_Z_LIFT
+    };
+  }
+
+  function projectedBounds(isIso) {
+    const b = data.bounds;
+    const points = [];
+    for (const x of [b.minX, b.maxX]) {
+      for (const y of [b.minY, b.maxY]) {
+        if (isIso) {
+          for (const z of [b.minZ, b.maxZ]) points.push(projectIso(x, y, z));
+        } else {
+          points.push(projectTop(x, y));
+        }
+      }
+    }
+    return {
+      minX: Math.min(...points.map(p => p.x)),
+      maxX: Math.max(...points.map(p => p.x)),
+      minY: Math.min(...points.map(p => p.y)),
+      maxY: Math.max(...points.map(p => p.y))
+    };
+  }
+
   function resetView() {
     if (!data) return;
     const r = wrap.getBoundingClientRect();
-    const b = data.bounds;
+    const b = projectedBounds(mode.value === 'iso');
     const w = Math.max(1, b.maxX - b.minX);
     const h = Math.max(1, b.maxY - b.minY);
     const pad = 60;
     view.scale = Math.min((r.width - pad) / w, (r.height - pad) / h);
     if (!Number.isFinite(view.scale) || view.scale <= 0) view.scale = 1;
     view.ox = r.width / 2 - ((b.minX + b.maxX) / 2) * view.scale;
-    view.oy = r.height / 2 + ((b.minY + b.maxY) / 2) * view.scale;
+    view.oy = r.height / 2 - ((b.minY + b.maxY) / 2) * view.scale;
     draw();
   }
 
   function worldToScreen(x, y) {
-    return [x * view.scale + view.ox, -y * view.scale + view.oy];
+    const p = projectTop(x, y);
+    return [p.x * view.scale + view.ox, p.y * view.scale + view.oy];
   }
 
   function isoToScreen(x, y, z) {
-    const ix = (x - y) * 0.72;
-    const iy = (x + y) * 0.36 - z * 4.5;
-    return [ix * view.scale + view.ox, iy * view.scale + view.oy];
+    const p = projectIso(x, y, z);
+    return [p.x * view.scale + view.ox, p.y * view.scale + view.oy];
   }
 
   function drawGrid() {
@@ -1770,7 +1808,8 @@
     updateLayerText();
     draw();
   });
-  [mode, showExtrude, showTravel, showGrid, fadeOld, realLineWidth].forEach(el => el.addEventListener('change', draw));
+  mode.addEventListener('change', resetView);
+  [showExtrude, showTravel, showGrid, fadeOld, realLineWidth].forEach(el => el.addEventListener('change', draw));
   colorSpeed.addEventListener('change', () => {
     if (colorSpeed.checked) colorK.checked = false;
     updateKLegend();
