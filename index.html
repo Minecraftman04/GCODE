@@ -896,8 +896,11 @@
 
     const extrusionKValues = [...new Set(moves.filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
     const numericKValues = extrusionKValues.filter(k => k !== 'unset' && Number.isFinite(Number(k))).map(Number);
-    const minK = numericKValues.length ? Math.min(...numericKValues) : null;
-    const maxK = numericKValues.length ? Math.max(...numericKValues) : null;
+    let minK = null, maxK = null;
+    for (const k of numericKValues) {
+      minK = minK === null ? k : Math.min(minK, k);
+      maxK = maxK === null ? k : Math.max(maxK, k);
+    }
     data = {
       fileName, moves, layers,
       bounds: { minX, minY, minZ, maxX, maxY, maxZ },
@@ -969,6 +972,8 @@
     }
 
     const widths = [];
+    let minWidth = Infinity;
+    let maxWidth = -Infinity;
     for (const m of dataset.moves) {
       if (!m.extrude) {
         m.lineWidthMm = null;
@@ -981,10 +986,13 @@
       const width = Number.isFinite(rawWidth) ? Math.max(0.05, Math.min(8, rawWidth)) : fallbackLineWidth;
       m.lineWidthMm = width;
       widths.push(width);
+      if (width < minWidth) minWidth = width;
+      if (width > maxWidth) maxWidth = width;
     }
     if (widths.length) {
-      dataset.minLineWidth = Math.min(...widths);
-      dataset.maxLineWidth = Math.max(...widths);
+      // Avoid Math.min(...largeArray) / Math.max(...largeArray): large G-code files can exceed the JS argument stack.
+      dataset.minLineWidth = minWidth;
+      dataset.maxLineWidth = maxWidth;
       dataset.medianLineWidth = median(widths);
     }
   }
