@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local G-code Viewer – Linear Advance K Preview + Playback</title>
+<title>Local G-code Viewer – Linear Advance K + Marlin Motion Playback</title>
 <style>
   :root{
     --bg:#0e1117;
@@ -276,6 +276,64 @@
     color:var(--muted);
     font-size:13px;
   }
+
+  .motionGrid{
+    margin-top:10px;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+  }
+  .motionField{
+    background:#0b0f16;
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:7px;
+  }
+  .motionField label{
+    display:block;
+    color:var(--muted);
+    font-size:11px;
+    margin-bottom:5px;
+  }
+  .motionField .unit{
+    display:flex;
+    align-items:center;
+    gap:5px;
+  }
+  .motionField input{
+    width:100%;
+    min-width:0;
+    background:transparent;
+    color:var(--text);
+    border:0;
+    outline:0;
+    font-weight:750;
+    font-size:14px;
+    padding:1px;
+  }
+  .motionField span{
+    color:var(--muted);
+    font-size:11px;
+    white-space:nowrap;
+  }
+  .motionButtons{
+    margin-top:10px;
+    display:flex;
+    gap:8px;
+  }
+  .motionStatus{
+    margin-top:9px;
+    padding:9px;
+    border-radius:10px;
+    border:1px solid var(--border);
+    background:#0b0f16;
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.42;
+  }
+  .motionStatus strong{color:var(--text)}
+  .stat .v.compact{font-size:13px;line-height:1.25}
+
   .searchBox{
     width:100%;
     background:#0b0f16;
@@ -306,7 +364,7 @@
 </head>
 <body>
 <header>
-  <h1>Local G-code Viewer – K Colour Preview</h1>
+  <h1>Local G-code Viewer – K Colour + Motion Playback</h1>
   <span class="badge">offline</span>
   <label class="fileLabel" for="fileInput">Open GCODE</label>
   <input id="fileInput" type="file" accept=".gcode,.gc,.gco,.nc,.txt">
@@ -354,6 +412,46 @@
         <div class="stat"><div class="k">Est. time</div><div class="v" id="timeStat">—</div></div>
         <div class="stat"><div class="k">K values used</div><div class="v" id="kValuesStat">—</div></div>
         <div class="stat"><div class="k">K changes</div><div class="v" id="kChangesStat">—</div></div>
+        <div class="stat"><div class="k">Timing model</div><div class="v compact" id="motionModelStat">—</div></div>
+        <div class="stat"><div class="k">M-codes found</div><div class="v compact" id="motionCodesStat">—</div></div>
+      </div>
+    </div>
+
+
+    <div class="panel">
+      <h2>Motion timing</h2>
+      <div class="toggles">
+        <label><input type="checkbox" id="motionModel" checked> Simulate acceleration + Classic XY/Z jerk</label>
+      </div>
+      <div class="motionGrid">
+        <div class="motionField">
+          <label for="fallbackPrintAccel">Fallback print acceleration</label>
+          <div class="unit"><input id="fallbackPrintAccel" type="number" min="1" step="1" value="800"><span>mm/s²</span></div>
+        </div>
+        <div class="motionField">
+          <label for="fallbackTravelAccel">Fallback travel acceleration</label>
+          <div class="unit"><input id="fallbackTravelAccel" type="number" min="1" step="1" value="800"><span>mm/s²</span></div>
+        </div>
+        <div class="motionField">
+          <label for="fallbackXJerk">Fallback X jerk</label>
+          <div class="unit"><input id="fallbackXJerk" type="number" min="0.01" step="0.1" value="8"><span>mm/s</span></div>
+        </div>
+        <div class="motionField">
+          <label for="fallbackYJerk">Fallback Y jerk</label>
+          <div class="unit"><input id="fallbackYJerk" type="number" min="0.01" step="0.1" value="8"><span>mm/s</span></div>
+        </div>
+        <div class="motionField">
+          <label for="fallbackZJerk">Fallback Z jerk</label>
+          <div class="unit"><input id="fallbackZJerk" type="number" min="0.01" step="0.01" value="0.4"><span>mm/s</span></div>
+        </div>
+      </div>
+      <div class="motionButtons">
+        <button id="recalcMotionBtn" disabled>Recalculate timing</button>
+      </div>
+      <div class="motionStatus" id="motionStatus">Load G-code to inspect motion settings.</div>
+      <div class="hint" style="margin-top:9px">
+        Reads <code>M201</code>, <code>M203</code>, <code>M204</code>, <code>M205</code> Classic Jerk
+        and <code>M220</code> from the file. Fallback values are used only when commands are absent.
       </div>
     </div>
 
@@ -370,7 +468,7 @@
         Use the layer slider at the bottom. Mouse wheel zooms, left-drag pans.
         Enable <strong>Colour extrusion by Linear Advance K</strong> to highlight where
         <code>M900 K…</code> values are active, including when K changes between models.
-        This is also useful for checking perimeters, infill, travel moves, layer order and Z seams.
+        Playback can also simulate Marlin-style acceleration and Classic Jerk timing for a closer visual preview of speed changes.
       </div>
     </div>
   </aside>
@@ -410,7 +508,7 @@
         <input id="playSlider" type="range" min="0" max="0" step="0.01" value="0" disabled>
         <span id="playTime" class="timeText">0:00 / —</span>
       </div>
-      <div class="playNote">At 1×, playback follows movement feedrates. Heating, dwell commands and acceleration delays are not timed. Current-layer mode is fastest for large files.</div>
+      <div class="playNote">At 1×, playback follows the calculated motion timeline. With motion timing enabled it includes acceleration/deceleration and Classic Jerk corner limits. Heater waits and firmware planner internals are not simulated.</div>
       <div class="row">
         <label>Layer</label>
         <input id="layerSlider" type="range" min="0" max="0" value="0" disabled>
@@ -455,6 +553,14 @@
   const playState = document.getElementById('playState');
   const playSlider = document.getElementById('playSlider');
   const playTime = document.getElementById('playTime');
+  const motionModel = document.getElementById('motionModel');
+  const fallbackPrintAccel = document.getElementById('fallbackPrintAccel');
+  const fallbackTravelAccel = document.getElementById('fallbackTravelAccel');
+  const fallbackXJerk = document.getElementById('fallbackXJerk');
+  const fallbackYJerk = document.getElementById('fallbackYJerk');
+  const fallbackZJerk = document.getElementById('fallbackZJerk');
+  const recalcMotionBtn = document.getElementById('recalcMotionBtn');
+  const motionStatus = document.getElementById('motionStatus');
   const searchInput = document.getElementById('searchInput');
   const searchResults = document.getElementById('searchResults');
 
@@ -481,6 +587,8 @@
     time: document.getElementById('timeStat'),
     kValues: document.getElementById('kValuesStat'),
     kChanges: document.getElementById('kChangesStat'),
+    motionModel: document.getElementById('motionModelStat'),
+    motionCodes: document.getElementById('motionCodesStat'),
   };
 
   function fitCanvas() {
@@ -504,6 +612,34 @@
     return params;
   }
 
+  function cloneMotion(s) {
+    return {
+      printAccel: s.printAccel,
+      travelAccel: s.travelAccel,
+      maxAccel: { ...s.maxAccel },
+      maxFeed: { ...s.maxFeed },
+      jerk: { ...s.jerk },
+      junctionDeviation: s.junctionDeviation,
+      feedPct: s.feedPct
+    };
+  }
+
+  function fallbackMotionValues() {
+    const positive = (el, fallback) => {
+      const v = Number(el.value);
+      return Number.isFinite(v) && v > 0 ? v : fallback;
+    };
+    return {
+      printAccel: positive(fallbackPrintAccel, 800),
+      travelAccel: positive(fallbackTravelAccel, 800),
+      jerk: {
+        x: positive(fallbackXJerk, 8),
+        y: positive(fallbackYJerk, 8),
+        z: positive(fallbackZJerk, 0.4)
+      }
+    };
+  }
+
   async function parseGcode(text, fileName='loaded file') {
     stopPlaybackLoop();
     playback.active = false;
@@ -516,14 +652,23 @@
     let pos = { x: 0, y: 0, z: 0, e: 0, f: 0 };
     let absXYZ = true;
     let absE = true;
-    let units = 1; // mm. Inch mode multiplies by 25.4.
+    let units = 1;
     let currentLayer = 0;
     let lastLayerZ = null;
     let explicitLayerSeen = false;
     let totalExtrusion = 0;
-    let estimatedSeconds = 0;
     let currentK = null;
     const kChanges = [];
+    const motionCodesSeen = new Set();
+    let motion = {
+      printAccel: null,
+      travelAccel: null,
+      maxAccel: { x: null, y: null, z: null, e: null },
+      maxFeed: { x: null, y: null, z: null, e: null },
+      jerk: { x: null, y: null, z: null, e: null },
+      junctionDeviation: null,
+      feedPct: 100
+    };
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     let minF = Infinity, maxF = 0;
@@ -536,10 +681,10 @@
 
     const total = rawLines.length;
     for (let i = 0; i < total; i++) {
-      let raw = rawLines[i];
+      const raw = rawLines[i];
       const commentIndex = raw.indexOf(';');
       const comment = commentIndex >= 0 ? raw.slice(commentIndex) : '';
-      let code = commentIndex >= 0 ? raw.slice(0, commentIndex).trim() : raw.trim();
+      const code = commentIndex >= 0 ? raw.slice(0, commentIndex).trim() : raw.trim();
       const upperComment = comment.toUpperCase();
 
       if (upperComment.includes('LAYER:')) {
@@ -574,6 +719,59 @@
         currentK = p.K;
         kChanges.push({ k: currentK, line: i + 1, layer: currentLayer, raw });
       }
+      else if (cmd === 'M201') {
+        let changed = false;
+        for (const axis of ['X', 'Y', 'Z', 'E']) {
+          if (axis in p && Number.isFinite(p[axis])) {
+            motion.maxAccel[axis.toLowerCase()] = p[axis] * units;
+            changed = true;
+          }
+        }
+        if (changed) motionCodesSeen.add('M201');
+      }
+      else if (cmd === 'M203') {
+        let changed = false;
+        for (const axis of ['X', 'Y', 'Z', 'E']) {
+          if (axis in p && Number.isFinite(p[axis])) {
+            motion.maxFeed[axis.toLowerCase()] = p[axis] * units;
+            changed = true;
+          }
+        }
+        if (changed) motionCodesSeen.add('M203');
+      }
+      else if (cmd === 'M204') {
+        if ('S' in p && Number.isFinite(p.S)) {
+          motion.printAccel = p.S * units;
+          motion.travelAccel = p.S * units;
+          motionCodesSeen.add('M204');
+        }
+        if ('P' in p && Number.isFinite(p.P)) {
+          motion.printAccel = p.P * units;
+          motionCodesSeen.add('M204');
+        }
+        if ('T' in p && Number.isFinite(p.T)) {
+          motion.travelAccel = p.T * units;
+          motionCodesSeen.add('M204');
+        }
+      }
+      else if (cmd === 'M205') {
+        let changed = false;
+        for (const axis of ['X', 'Y', 'Z', 'E']) {
+          if (axis in p && Number.isFinite(p[axis])) {
+            motion.jerk[axis.toLowerCase()] = p[axis] * units;
+            changed = true;
+          }
+        }
+        if ('J' in p && Number.isFinite(p.J)) {
+          motion.junctionDeviation = p.J * units;
+          changed = true;
+        }
+        if (changed) motionCodesSeen.add('M205');
+      }
+      else if (cmd === 'M220' && 'S' in p && Number.isFinite(p.S)) {
+        motion.feedPct = Math.max(0, p.S);
+        motionCodesSeen.add('M220');
+      }
       else if (cmd === 'G92') {
         if ('X' in p) pos.x = p.X * units;
         if ('Y' in p) pos.y = p.Y * units;
@@ -586,8 +784,7 @@
         const ny = ('Y' in p) ? (absXYZ ? p.Y * units : pos.y + p.Y * units) : pos.y;
         const nz = ('Z' in p) ? (absXYZ ? p.Z * units : pos.z + p.Z * units) : pos.z;
         const ne = ('E' in p) ? (absE ? p.E : pos.e + p.E) : pos.e;
-        const nf = ('F' in p) ? p.F : pos.f;
-
+        const nf = ('F' in p) ? p.F * units : pos.f;
         const de = ne - pos.e;
         const dx = nx - pos.x, dy = ny - pos.y, dz = nz - pos.z;
         const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
@@ -601,50 +798,33 @@
           lastLayerZ = nz;
           if (!explicitLayerSeen) {
             const zKey = nz.toFixed(3);
-            if (!layerByZ.has(zKey)) {
-              layerByZ.set(zKey, layers.length);
-            }
+            if (!layerByZ.has(zKey)) layerByZ.set(zKey, layers.length);
             currentLayer = layerByZ.get(zKey);
           }
           ensureLayer(currentLayer, nz);
         }
 
         if (isMove) {
-          const rawDurationS = nf > 0 && dist > 0 ? dist / (nf / 60) : 0;
-          const durationS = Number.isFinite(rawDurationS) ? rawDurationS : 0;
           const move = {
             x1: old.x, y1: old.y, z1: old.z,
             x2: nx, y2: ny, z2: nz,
-            eDelta: de,
-            f: nf,
-            k: currentK,
-            durationS,
-            startTimeS: estimatedSeconds,
-            endTimeS: estimatedSeconds + durationS,
-            extrude: isExtrude,
-            retract: isRetract,
-            line: i + 1,
-            layer: currentLayer,
-            raw
+            dx, dy, dz, dist, eDelta: de, f: nf, k: currentK,
+            motion: cloneMotion(motion),
+            durationS: 0, startTimeS: 0, endTimeS: 0,
+            extrude: isExtrude, retract: isRetract,
+            line: i + 1, layer: currentLayer, raw
           };
           moves.push(move);
           ensureLayer(currentLayer, nz);
           layers[currentLayer].moves.push(move);
-
           if (isExtrude) {
             totalExtrusion += de;
             layers[currentLayer].extrusionMm += de;
           }
-
-          if (nf > 0 && dist > 0) {
-            if (durationS > 0) {
-              estimatedSeconds += durationS;
-              layers[currentLayer].timeS += durationS;
-            }
+          if (nf > 0) {
             minF = Math.min(minF, nf);
             maxF = Math.max(maxF, nf);
           }
-
           minX = Math.min(minX, old.x, nx); minY = Math.min(minY, old.y, ny); minZ = Math.min(minZ, old.z, nz);
           maxX = Math.max(maxX, old.x, nx); maxY = Math.max(maxY, old.y, ny); maxZ = Math.max(maxZ, old.z, nz);
         }
@@ -654,36 +834,183 @@
     }
 
     await progress(total, total);
+    if (!Number.isFinite(minX)) throw new Error('No G0/G1 moves found in this file.');
 
-    if (!Number.isFinite(minX)) {
-      throw new Error('No G0/G1 moves found in this file.');
-    }
-
-    const extrusionKValues = [...new Set(
-      moves.filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k)
-    )];
+    const extrusionKValues = [...new Set(moves.filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
     data = {
       fileName, moves, layers,
       bounds: { minX, minY, minZ, maxX, maxY, maxZ },
-      totalExtrusion, estimatedSeconds,
-      kChanges, extrusionKValues,
-      minF: Number.isFinite(minF) ? minF : 0,
-      maxF
+      totalExtrusion, estimatedSeconds: 0,
+      kChanges, extrusionKValues, motionCodesSeen: [...motionCodesSeen],
+      hasJunctionDeviation: moves.some(m => Number.isFinite(m.motion.junctionDeviation)),
+      minF: Number.isFinite(minF) ? minF : 0, maxF
     };
     selectedLayer = Math.max(0, layers.length - 1);
     empty.style.display = 'none';
     resetBtn.disabled = false;
+    recalcMotionBtn.disabled = false;
     layerSlider.disabled = false;
     layerSlider.max = Math.max(0, layers.length - 1);
     layerSlider.value = selectedLayer;
     playback.active = false;
     playback.timeS = 0;
     playback.speed = Number(playSpeed.value) || 1;
-    updateStats();
-    updatePlaybackControls();
-    resetView();
+    rebuildMotionTiming();
     updateSearch();
     statusEl.textContent = fileName;
+    resetView();
+  }
+
+  function moveAxisFraction(m, deltaKey) {
+    return m.dist > 0 ? Math.abs(m[deltaKey]) / m.dist : 0;
+  }
+
+  function moveNominalSpeed(m) {
+    let v = Math.max(0.001, (m.f || 0) / 60 * ((m.motion.feedPct ?? 100) / 100));
+    for (const axis of ['x', 'y', 'z']) {
+      const fraction = moveAxisFraction(m, 'd' + axis);
+      const cap = m.motion.maxFeed[axis];
+      if (fraction > 0.0000001 && Number.isFinite(cap) && cap > 0) v = Math.min(v, cap / fraction);
+    }
+    return v;
+  }
+
+  function moveAcceleration(m, defaults) {
+    let a = m.extrude ? (m.motion.printAccel ?? defaults.printAccel) : (m.motion.travelAccel ?? defaults.travelAccel);
+    a = Math.max(0.001, a);
+    for (const axis of ['x', 'y', 'z']) {
+      const fraction = moveAxisFraction(m, 'd' + axis);
+      const cap = m.motion.maxAccel[axis];
+      if (fraction > 0.0000001 && Number.isFinite(cap) && cap > 0) a = Math.min(a, cap / fraction);
+    }
+    return Math.max(0.001, a);
+  }
+
+  function junctionSpeedLimit(a, b, defaults) {
+    if (!a || !b) return 0;
+    const jerk = {
+      x: b.motion.jerk.x ?? a.motion.jerk.x ?? defaults.jerk.x,
+      y: b.motion.jerk.y ?? a.motion.jerk.y ?? defaults.jerk.y,
+      z: b.motion.jerk.z ?? a.motion.jerk.z ?? defaults.jerk.z
+    };
+    let limit = Math.min(a.nominalSpeed, b.nominalSpeed);
+    for (const axis of ['x','y','z']) {
+      const ua = a.dist > 0 ? a['d' + axis] / a.dist : 0;
+      const ub = b.dist > 0 ? b['d' + axis] / b.dist : 0;
+      const velocityChangeFactor = Math.abs(ub - ua);
+      if (velocityChangeFactor > 0.0000001) limit = Math.min(limit, Math.max(0.001, jerk[axis]) / velocityChangeFactor);
+    }
+    return Math.max(0, limit);
+  }
+
+  function trapezoidProfile(m, entrySpeed, exitSpeed, simulateMotion) {
+    const dist = Math.max(0, m.dist);
+    const target = Math.max(0.001, m.nominalSpeed);
+    if (!simulateMotion || dist <= 0) {
+      const duration = dist / target;
+      return { durationS: duration, entrySpeed: target, exitSpeed: target, peakSpeed: target, accelTime: 0, cruiseTime: duration, decelTime: 0, accelDist: 0, cruiseDist: dist, decelDist: 0 };
+    }
+    const a = Math.max(0.001, m.accel);
+    const v0 = Math.min(target, Math.max(0, entrySpeed));
+    const v1 = Math.min(target, Math.max(0, exitSpeed));
+    const accelerateToTarget = Math.max(0, (target*target - v0*v0) / (2*a));
+    const decelerateFromTarget = Math.max(0, (target*target - v1*v1) / (2*a));
+    let peak = target;
+    let accelDist = accelerateToTarget;
+    let cruiseDist = Math.max(0, dist - accelerateToTarget - decelerateFromTarget);
+    if (accelerateToTarget + decelerateFromTarget > dist) {
+      peak = Math.sqrt(Math.max(0, a * dist + (v0*v0 + v1*v1) / 2));
+      peak = Math.max(v0, v1, Math.min(target, peak));
+      accelDist = Math.max(0, (peak*peak - v0*v0) / (2*a));
+      cruiseDist = 0;
+    }
+    const decelDist = Math.max(0, dist - accelDist - cruiseDist);
+    const accelTime = Math.max(0, (peak - v0) / a);
+    const cruiseTime = peak > 0 ? cruiseDist / peak : 0;
+    const decelTime = Math.max(0, (peak - v1) / a);
+    return {
+      durationS: accelTime + cruiseTime + decelTime,
+      entrySpeed: v0, exitSpeed: v1, peakSpeed: peak,
+      accelTime, cruiseTime, decelTime, accelDist, cruiseDist, decelDist
+    };
+  }
+
+  function rebuildMotionTiming() {
+    if (!data) return;
+    stopPlaybackLoop();
+    const defaults = fallbackMotionValues();
+    const simulateMotion = motionModel.checked;
+    const moves = data.moves;
+    const count = moves.length;
+    const boundaries = new Array(count + 1).fill(0);
+
+    for (const m of moves) {
+      m.nominalSpeed = moveNominalSpeed(m);
+      m.accel = moveAcceleration(m, defaults);
+    }
+
+    if (simulateMotion) {
+      for (let i = 1; i < count; i++) boundaries[i] = junctionSpeedLimit(moves[i - 1], moves[i], defaults);
+      for (let pass = 0; pass < 3; pass++) {
+        for (let i = 0; i < count; i++) {
+          const reachable = Math.sqrt(Math.max(0, boundaries[i] * boundaries[i] + 2 * moves[i].accel * moves[i].dist));
+          boundaries[i + 1] = Math.min(boundaries[i + 1], moves[i].nominalSpeed, reachable);
+        }
+        for (let i = count - 1; i >= 0; i--) {
+          const reachable = Math.sqrt(Math.max(0, boundaries[i + 1] * boundaries[i + 1] + 2 * moves[i].accel * moves[i].dist));
+          boundaries[i] = Math.min(boundaries[i], moves[i].nominalSpeed, reachable);
+        }
+      }
+    }
+
+    for (const layer of data.layers) layer.timeS = 0;
+    let totalS = 0;
+    for (let i = 0; i < count; i++) {
+      const m = moves[i];
+      Object.assign(m, trapezoidProfile(m, boundaries[i], boundaries[i + 1], simulateMotion));
+      m.startTimeS = totalS;
+      totalS += Number.isFinite(m.durationS) ? m.durationS : 0;
+      m.endTimeS = totalS;
+      if (data.layers[m.layer]) data.layers[m.layer].timeS += m.durationS;
+    }
+    data.estimatedSeconds = totalS;
+    data.timingMode = simulateMotion ? 'Accel + Classic Jerk' : 'Feedrate only';
+    data.fallbacks = defaults;
+    if (playback.timeS > totalS) playback.timeS = totalS;
+    updateStats();
+    updateMotionStatus();
+    updatePlaybackControls();
+    draw();
+  }
+
+  function updateMotionStatus() {
+    if (!data) return;
+    const commands = data.motionCodesSeen.length ? data.motionCodesSeen.join(', ') : 'none';
+    const fallback = data.fallbacks;
+    const warning = data.hasJunctionDeviation
+      ? '<br><span class="warn">M205 J (Junction Deviation) detected; this preview currently uses Classic Jerk fallback values for corners.</span>'
+      : '';
+    motionStatus.innerHTML =
+      `<strong>${data.timingMode}</strong> · Parsed motion commands: ${commands}.<br>` +
+      `Fallbacks when missing: P ${fallback.printAccel} mm/s², T ${fallback.travelAccel} mm/s², jerk X/Y/Z ${fallback.jerk.x}/${fallback.jerk.y}/${fallback.jerk.z} mm/s.` + warning;
+  }
+
+  function progressFractionForMove(m, localTimeS) {
+    if (!motionModel.checked || (m.accelTime === 0 && m.decelTime === 0)) {
+      return m.durationS > 0 ? Math.max(0, Math.min(1, localTimeS / m.durationS)) : 1;
+    }
+    const t = Math.max(0, Math.min(m.durationS, localTimeS));
+    const a = Math.max(0.001, m.accel);
+    let distance = 0;
+    if (t <= m.accelTime) {
+      distance = m.entrySpeed * t + 0.5 * a * t * t;
+    } else if (t <= m.accelTime + m.cruiseTime) {
+      distance = m.accelDist + m.peakSpeed * (t - m.accelTime);
+    } else {
+      const dt = t - m.accelTime - m.cruiseTime;
+      distance = m.accelDist + m.cruiseDist + m.peakSpeed * dt - 0.5 * a * dt * dt;
+    }
+    return m.dist > 0 ? Math.max(0, Math.min(1, distance / m.dist)) : 1;
   }
 
   function progress(i, total) {
@@ -710,6 +1037,8 @@
       ? data.extrusionKValues.map(formatK).join(', ')
       : '—';
     statsEls.kChanges.textContent = data.kChanges.length.toLocaleString();
+    statsEls.motionModel.textContent = data.timingMode || '—';
+    statsEls.motionCodes.textContent = data.motionCodesSeen?.length ? data.motionCodesSeen.join(', ') : 'Fallbacks';
     updateKLegend();
     updateLayerText();
   }
@@ -860,7 +1189,7 @@
       if (colorK.checked && type === 'extrude') {
         for (const m of filtered) drawSingleMove(m, kColor(m.k), isIso);
       } else if (colorSpeed.checked && type === 'extrude') {
-        for (const m of filtered) drawSingleMove(m, speedColor(m.f), isIso);
+        for (const m of filtered) drawSingleMove(m, speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60), isIso);
       } else {
         ctx.beginPath();
         for (const m of filtered) {
@@ -943,7 +1272,7 @@
   function colourForMove(m) {
     if (!m.extrude) return getCSS('--travel');
     if (colorK.checked) return kColor(m.k);
-    if (colorSpeed.checked) return speedColor(m.f);
+    if (colorSpeed.checked) return speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60);
     return getCSS('--extrude');
   }
 
@@ -994,7 +1323,7 @@
     if (completed.length) drawMoves(completed, 1, isIso);
 
     if (current && current.durationS > 0 && playback.timeS >= current.startTimeS) {
-      const fraction = (playback.timeS - current.startTimeS) / current.durationS;
+      const fraction = progressFractionForMove(current, playback.timeS - current.startTimeS);
       drawPartialMove(current, fraction, isIso);
       drawNozzleMarker(
         current.x1 + (current.x2 - current.x1) * fraction,
@@ -1105,7 +1434,7 @@
     ctx.fillText(`Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves${kSummary}`, 28, 58);
     if (playback.active) {
       const state = playback.playing ? 'PLAYING' : (playback.timeS >= data.estimatedSeconds ? 'COMPLETE' : 'PAUSED');
-      ctx.fillText(`${state}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×`, 28, 76);
+      ctx.fillText(`${state}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×  |  ${data.timingMode}`, 28, 76);
       ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 94);
     } else {
       ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 76);
@@ -1164,6 +1493,10 @@
       'G90',
       'M82',
       'G92 E0',
+      'M201 X500 Y500 Z100 E5000',
+      'M203 X500 Y500 Z10 E50',
+      'M204 P800 T800',
+      'M205 X8 Y8 Z0.4',
       'G1 Z0.2 F1200',
       'M900 K0.02',
       'G1 X10 Y10 F6000',
@@ -1228,6 +1561,11 @@
     if (colorK.checked) colorSpeed.checked = false;
     updateKLegend();
     draw();
+  });
+  motionModel.addEventListener('change', rebuildMotionTiming);
+  recalcMotionBtn.addEventListener('click', rebuildMotionTiming);
+  [fallbackPrintAccel, fallbackTravelAccel, fallbackXJerk, fallbackYJerk, fallbackZJerk].forEach(el => {
+    el.addEventListener('change', rebuildMotionTiming);
   });
   searchInput.addEventListener('input', updateSearch);
 
