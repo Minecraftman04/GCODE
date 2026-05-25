@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local G-code Viewer – Linear Advance K Preview</title>
+<style>
+  :root{
+    --bg:#0e1117;
+    --panel:#151a23;
+    --panel2:#1c2330;
+    --text:#e8eef9;
+    --muted:#9aa7bd;
+    --accent:#7dd3fc;
+    --extrude:#5eead4;
+    --travel:#f87171;
+    --grid:#2c3545;
+    --warn:#fbbf24;
+    --border:#2b3445;
+    --unset:#64748b;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    overflow:hidden;
+  }
+  header{
+    height:58px;
+    display:flex;
+    align-items:center;
+    gap:14px;
+    padding:10px 14px;
+    border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg,#151a23,#10141c);
+  }
+  header h1{
+    margin:0;
+    font-size:18px;
+    font-weight:700;
+    white-space:nowrap;
+  }
+  .badge{
+    font-size:12px;
+    color:#08111a;
+    background:var(--accent);
+    border-radius:999px;
+    padding:3px 8px;
+    font-weight:700;
+  }
+  button, select, input[type="range"], input[type="number"]{
+    accent-color:var(--accent);
+  }
+  button, .fileLabel, select{
+    background:var(--panel2);
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:9px 11px;
+    cursor:pointer;
+    font-weight:650;
+  }
+  button:hover,.fileLabel:hover,select:hover{border-color:var(--accent)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input[type="file"]{display:none}
+  main{
+    height:calc(100vh - 58px);
+    display:grid;
+    grid-template-columns:330px 1fr;
+    min-height:0;
+  }
+  aside{
+    border-right:1px solid var(--border);
+    background:var(--panel);
+    padding:14px;
+    overflow:auto;
+  }
+  .viewer{
+    min-width:0;
+    min-height:0;
+    display:grid;
+    grid-template-rows:1fr auto;
+  }
+  .canvasWrap{
+    position:relative;
+    min-height:0;
+    background:
+      radial-gradient(circle at 10% 10%, rgba(125,211,252,.08), transparent 30%),
+      radial-gradient(circle at 90% 90%, rgba(94,234,212,.06), transparent 30%),
+      #0b0f16;
+  }
+  canvas{
+    width:100%;
+    height:100%;
+    display:block;
+    cursor:grab;
+  }
+  canvas:active{cursor:grabbing}
+  .drop{
+    position:absolute;
+    inset:18px;
+    border:2px dashed rgba(125,211,252,.35);
+    border-radius:18px;
+    display:none;
+    align-items:center;
+    justify-content:center;
+    background:rgba(10,15,24,.72);
+    color:var(--accent);
+    font-size:22px;
+    font-weight:800;
+    pointer-events:none;
+  }
+  .empty{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    color:var(--muted);
+    padding:24px;
+  }
+  .empty strong{color:var(--text)}
+  .controls{
+    border-top:1px solid var(--border);
+    background:var(--panel);
+    padding:10px 14px;
+    display:grid;
+    gap:9px;
+  }
+  .row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .row label{
+    color:var(--muted);
+    font-size:13px;
+    min-width:68px;
+  }
+  .row input[type="range"]{
+    flex:1;
+    min-width:160px;
+  }
+  .statGrid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:9px;
+    margin-top:12px;
+  }
+  .stat{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:10px;
+  }
+  .stat .k{
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.1;
+  }
+  .stat .v{
+    font-size:18px;
+    font-weight:800;
+    margin-top:4px;
+    word-break:break-word;
+  }
+  .panel{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:12px;
+    margin-top:12px;
+  }
+  .panel h2{
+    margin:0 0 10px;
+    font-size:15px;
+  }
+  .hint{
+    color:var(--muted);
+    font-size:13px;
+    line-height:1.45;
+  }
+  .legend{
+    display:flex;
+    gap:12px;
+    flex-wrap:wrap;
+    margin-top:8px;
+  }
+  .leg{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    color:var(--muted);
+    font-size:13px;
+  }
+  .sw{
+    width:16px;height:4px;border-radius:99px;background:white;
+  }
+  .sw.ex{background:var(--extrude)}
+  .sw.tr{background:var(--travel)}
+  .kLegend{
+    margin-top:10px;
+    padding:9px;
+    background:#0b0f16;
+    border:1px solid var(--border);
+    border-radius:10px;
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .kLegend[hidden]{display:none}
+  .kLegend .title{
+    width:100%;
+    font-size:12px;
+    color:var(--muted);
+    font-weight:700;
+  }
+  .sw.k{
+    height:10px;
+    width:18px;
+  }
+  .progress{
+    height:8px;
+    background:#0b0f16;
+    border-radius:999px;
+    overflow:hidden;
+    border:1px solid var(--border);
+    flex:1;
+    min-width:140px;
+  }
+  .bar{
+    width:0%;
+    height:100%;
+    background:var(--accent);
+  }
+  #status{
+    color:var(--muted);
+    font-size:13px;
+  }
+  .warn{
+    color:var(--warn);
+  }
+  .toggles{
+    display:grid;
+    gap:7px;
+  }
+  .toggles label{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    color:var(--muted);
+    font-size:13px;
+  }
+  .searchBox{
+    width:100%;
+    background:#0b0f16;
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:9px 10px;
+  }
+  pre{
+    margin:8px 0 0;
+    max-height:160px;
+    overflow:auto;
+    color:#cbd5e1;
+    font-size:12px;
+    white-space:pre-wrap;
+    background:#0b0f16;
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:10px;
+  }
+  @media(max-width:850px){
+    body{overflow:auto}
+    main{grid-template-columns:1fr;height:auto}
+    aside{border-right:0;border-bottom:1px solid var(--border)}
+    .viewer{height:70vh}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Local G-code Viewer – K Colour Preview</h1>
+  <span class="badge">offline</span>
+  <label class="fileLabel" for="fileInput">Open GCODE</label>
+  <input id="fileInput" type="file" accept=".gcode,.gc,.gco,.nc,.txt">
+  <button id="sampleBtn">Load sample</button>
+  <button id="resetBtn" disabled>Reset view</button>
+  <span id="status">No file loaded</span>
+</header>
+
+<main>
+  <aside>
+    <div class="panel" style="margin-top:0">
+      <h2>View</h2>
+      <div class="row">
+        <label>Mode</label>
+        <select id="mode">
+          <option value="layer">Current layer</option>
+          <option value="upToLayer">Up to layer</option>
+          <option value="all">All layers</option>
+          <option value="iso">3D-ish preview</option>
+        </select>
+      </div>
+      <div class="toggles" style="margin-top:10px">
+        <label><input type="checkbox" id="showExtrude" checked> Show extrusion moves</label>
+        <label><input type="checkbox" id="showTravel" checked> Show travel moves</label>
+        <label><input type="checkbox" id="showGrid" checked> Show bed grid</label>
+        <label><input type="checkbox" id="fadeOld" checked> Fade previous layers</label>
+        <label><input type="checkbox" id="colorSpeed"> Colour extrusion by speed</label>
+        <label><input type="checkbox" id="colorK"> Colour extrusion by Linear Advance K</label>
+      </div>
+      <div class="legend">
+        <span class="leg"><span class="sw ex"></span>Extrusion</span>
+        <span class="leg"><span class="sw tr"></span>Travel</span>
+      </div>
+      <div id="kLegend" class="kLegend" hidden></div>
+    </div>
+
+    <div class="panel">
+      <h2>File statistics</h2>
+      <div class="statGrid">
+        <div class="stat"><div class="k">Layers</div><div class="v" id="layersStat">—</div></div>
+        <div class="stat"><div class="k">Moves</div><div class="v" id="movesStat">—</div></div>
+        <div class="stat"><div class="k">Filament</div><div class="v" id="filamentStat">—</div></div>
+        <div class="stat"><div class="k">Print size</div><div class="v" id="sizeStat">—</div></div>
+        <div class="stat"><div class="k">Height</div><div class="v" id="heightStat">—</div></div>
+        <div class="stat"><div class="k">Est. time</div><div class="v" id="timeStat">—</div></div>
+        <div class="stat"><div class="k">K values used</div><div class="v" id="kValuesStat">—</div></div>
+        <div class="stat"><div class="k">K changes</div><div class="v" id="kChangesStat">—</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Command search</h2>
+      <input id="searchInput" class="searchBox" placeholder="Search raw G-code, e.g. M106, G92, ;LAYER">
+      <pre id="searchResults">Load a file, then search for commands.</pre>
+    </div>
+
+    <div class="panel">
+      <h2>How to use</h2>
+      <div class="hint">
+        Drag a `.gcode` file onto the viewer or press <strong>Open GCODE</strong>.
+        Use the layer slider at the bottom. Mouse wheel zooms, left-drag pans.
+        Enable <strong>Colour extrusion by Linear Advance K</strong> to highlight where
+        <code>M900 K…</code> values are active, including when K changes between models.
+        This is also useful for checking perimeters, infill, travel moves, layer order and Z seams.
+      </div>
+    </div>
+  </aside>
+
+  <section class="viewer">
+    <div class="canvasWrap" id="canvasWrap">
+      <canvas id="canvas"></canvas>
+      <div class="drop" id="drop">Drop G-code file here</div>
+      <div class="empty" id="empty">
+        <div>
+          <strong>Open a G-code file to preview the print path.</strong><br>
+          Everything runs locally in your browser.
+        </div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="row">
+        <label>Layer</label>
+        <input id="layerSlider" type="range" min="0" max="0" value="0" disabled>
+        <span id="layerText">—</span>
+      </div>
+      <div class="row">
+        <label>Parsing</label>
+        <div class="progress"><div class="bar" id="bar"></div></div>
+        <span id="parseText">Idle</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const wrap = document.getElementById('canvasWrap');
+  const empty = document.getElementById('empty');
+  const drop = document.getElementById('drop');
+  const fileInput = document.getElementById('fileInput');
+  const sampleBtn = document.getElementById('sampleBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const statusEl = document.getElementById('status');
+  const layerSlider = document.getElementById('layerSlider');
+  const layerText = document.getElementById('layerText');
+  const parseText = document.getElementById('parseText');
+  const bar = document.getElementById('bar');
+  const mode = document.getElementById('mode');
+  const showExtrude = document.getElementById('showExtrude');
+  const showTravel = document.getElementById('showTravel');
+  const showGrid = document.getElementById('showGrid');
+  const fadeOld = document.getElementById('fadeOld');
+  const colorSpeed = document.getElementById('colorSpeed');
+  const colorK = document.getElementById('colorK');
+  const kLegend = document.getElementById('kLegend');
+  const searchInput = document.getElementById('searchInput');
+  const searchResults = document.getElementById('searchResults');
+
+  let data = null;
+  let rawLines = [];
+  let selectedLayer = 0;
+  let view = { scale: 1, ox: 0, oy: 0 };
+  let dragging = false, lastMouse = null;
+
+  const statsEls = {
+    layers: document.getElementById('layersStat'),
+    moves: document.getElementById('movesStat'),
+    filament: document.getElementById('filamentStat'),
+    size: document.getElementById('sizeStat'),
+    height: document.getElementById('heightStat'),
+    time: document.getElementById('timeStat'),
+    kValues: document.getElementById('kValuesStat'),
+    kChanges: document.getElementById('kChangesStat'),
+  };
+
+  function fitCanvas() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const r = wrap.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(r.width * dpr));
+    canvas.height = Math.max(1, Math.floor(r.height * dpr));
+    canvas.style.width = r.width + 'px';
+    canvas.style.height = r.height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function parseParams(code) {
+    const params = {};
+    const re = /([A-Za-z])([-+]?(?:\d+\.?\d*|\.\d+))/g;
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      params[m[1].toUpperCase()] = Number(m[2]);
+    }
+    return params;
+  }
+
+  async function parseGcode(text, fileName='loaded file') {
+    rawLines = text.split(/\r?\n/);
+    const moves = [];
+    const layers = [];
+    const layerByZ = new Map();
+
+    let pos = { x: 0, y: 0, z: 0, e: 0, f: 0 };
+    let absXYZ = true;
+    let absE = true;
+    let units = 1; // mm. Inch mode multiplies by 25.4.
+    let currentLayer = 0;
+    let lastLayerZ = null;
+    let explicitLayerSeen = false;
+    let totalExtrusion = 0;
+    let estimatedSeconds = 0;
+    let currentK = null;
+    const kChanges = [];
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let minF = Infinity, maxF = 0;
+
+    function ensureLayer(i, z) {
+      while (layers.length <= i) layers.push({ z: z ?? null, moves: [], extrusionMm: 0, timeS: 0 });
+      if (z !== null && z !== undefined && layers[i].z === null) layers[i].z = z;
+    }
+    ensureLayer(0, 0);
+
+    const total = rawLines.length;
+    for (let i = 0; i < total; i++) {
+      let raw = rawLines[i];
+      const commentIndex = raw.indexOf(';');
+      const comment = commentIndex >= 0 ? raw.slice(commentIndex) : '';
+      let code = commentIndex >= 0 ? raw.slice(0, commentIndex).trim() : raw.trim();
+      const upperComment = comment.toUpperCase();
+
+      if (upperComment.includes('LAYER:')) {
+        const m = upperComment.match(/LAYER:\s*(-?\d+)/);
+        if (m) {
+          currentLayer = Math.max(0, Number(m[1]) + 1);
+          explicitLayerSeen = true;
+          ensureLayer(currentLayer, pos.z);
+        }
+      }
+
+      if (!code) {
+        if (i % 5000 === 0) await progress(i, total);
+        continue;
+      }
+
+      const cmdMatch = code.match(/^([GMT]\d+)/i);
+      if (!cmdMatch) {
+        if (i % 5000 === 0) await progress(i, total);
+        continue;
+      }
+      const cmd = cmdMatch[1].toUpperCase();
+      const p = parseParams(code);
+
+      if (cmd === 'G20') units = 25.4;
+      else if (cmd === 'G21') units = 1;
+      else if (cmd === 'G90') absXYZ = true;
+      else if (cmd === 'G91') absXYZ = false;
+      else if (cmd === 'M82') absE = true;
+      else if (cmd === 'M83') absE = false;
+      else if (cmd === 'M900' && 'K' in p && Number.isFinite(p.K)) {
+        currentK = p.K;
+        kChanges.push({ k: currentK, line: i + 1, layer: currentLayer, raw });
+      }
+      else if (cmd === 'G92') {
+        if ('X' in p) pos.x = p.X * units;
+        if ('Y' in p) pos.y = p.Y * units;
+        if ('Z' in p) pos.z = p.Z * units;
+        if ('E' in p) pos.e = p.E;
+      }
+      else if (cmd === 'G0' || cmd === 'G1') {
+        const old = { ...pos };
+        const nx = ('X' in p) ? (absXYZ ? p.X * units : pos.x + p.X * units) : pos.x;
+        const ny = ('Y' in p) ? (absXYZ ? p.Y * units : pos.y + p.Y * units) : pos.y;
+        const nz = ('Z' in p) ? (absXYZ ? p.Z * units : pos.z + p.Z * units) : pos.z;
+        const ne = ('E' in p) ? (absE ? p.E : pos.e + p.E) : pos.e;
+        const nf = ('F' in p) ? p.F : pos.f;
+
+        const de = ne - pos.e;
+        const dx = nx - pos.x, dy = ny - pos.y, dz = nz - pos.z;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const isMove = dist > 0.00001;
+        const isExtrude = isMove && de > 0.000001;
+        const isRetract = de < -0.000001 && !isMove;
+
+        pos = { x: nx, y: ny, z: nz, e: ne, f: nf };
+
+        if ('Z' in p && Math.abs(nz - (lastLayerZ ?? nz)) > 0.0001) {
+          lastLayerZ = nz;
+          if (!explicitLayerSeen) {
+            const zKey = nz.toFixed(3);
+            if (!layerByZ.has(zKey)) {
+              layerByZ.set(zKey, layers.length);
+            }
+            currentLayer = layerByZ.get(zKey);
+          }
+          ensureLayer(currentLayer, nz);
+        }
+
+        if (isMove) {
+          const move = {
+            x1: old.x, y1: old.y, z1: old.z,
+            x2: nx, y2: ny, z2: nz,
+            eDelta: de,
+            f: nf,
+            k: currentK,
+            extrude: isExtrude,
+            retract: isRetract,
+            line: i + 1,
+            layer: currentLayer,
+            raw
+          };
+          moves.push(move);
+          ensureLayer(currentLayer, nz);
+          layers[currentLayer].moves.push(move);
+
+          if (isExtrude) {
+            totalExtrusion += de;
+            layers[currentLayer].extrusionMm += de;
+          }
+
+          if (nf > 0 && dist > 0) {
+            const t = dist / (nf / 60);
+            if (Number.isFinite(t)) {
+              estimatedSeconds += t;
+              layers[currentLayer].timeS += t;
+            }
+            minF = Math.min(minF, nf);
+            maxF = Math.max(maxF, nf);
+          }
+
+          minX = Math.min(minX, old.x, nx); minY = Math.min(minY, old.y, ny); minZ = Math.min(minZ, old.z, nz);
+          maxX = Math.max(maxX, old.x, nx); maxY = Math.max(maxY, old.y, ny); maxZ = Math.max(maxZ, old.z, nz);
+        }
+      }
+
+      if (i % 5000 === 0) await progress(i, total);
+    }
+
+    await progress(total, total);
+
+    if (!Number.isFinite(minX)) {
+      throw new Error('No G0/G1 moves found in this file.');
+    }
+
+    const extrusionKValues = [...new Set(
+      moves.filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k)
+    )];
+    data = {
+      fileName, moves, layers,
+      bounds: { minX, minY, minZ, maxX, maxY, maxZ },
+      totalExtrusion, estimatedSeconds,
+      kChanges, extrusionKValues,
+      minF: Number.isFinite(minF) ? minF : 0,
+      maxF
+    };
+    selectedLayer = Math.max(0, layers.length - 1);
+    empty.style.display = 'none';
+    resetBtn.disabled = false;
+    layerSlider.disabled = false;
+    layerSlider.max = Math.max(0, layers.length - 1);
+    layerSlider.value = selectedLayer;
+    updateStats();
+    resetView();
+    updateSearch();
+    statusEl.textContent = fileName;
+  }
+
+  function progress(i, total) {
+    return new Promise(resolve => {
+      const pct = total ? Math.round(i / total * 100) : 0;
+      bar.style.width = pct + '%';
+      parseText.textContent = pct >= 100 ? 'Done' : `Parsing ${pct}%`;
+      if (i % 25000 === 0) setTimeout(resolve, 0);
+      else resolve();
+    });
+  }
+
+  function updateStats() {
+    if (!data) return;
+    const b = data.bounds;
+    const w = b.maxX - b.minX, d = b.maxY - b.minY, h = b.maxZ - b.minZ;
+    statsEls.layers.textContent = data.layers.length;
+    statsEls.moves.textContent = data.moves.length.toLocaleString();
+    statsEls.filament.textContent = `${data.totalExtrusion.toFixed(1)} mm`;
+    statsEls.size.textContent = `${w.toFixed(1)} × ${d.toFixed(1)} mm`;
+    statsEls.height.textContent = `${h.toFixed(2)} mm`;
+    statsEls.time.textContent = formatTime(data.estimatedSeconds);
+    statsEls.kValues.textContent = data.extrusionKValues.length
+      ? data.extrusionKValues.map(formatK).join(', ')
+      : '—';
+    statsEls.kChanges.textContent = data.kChanges.length.toLocaleString();
+    updateKLegend();
+    updateLayerText();
+  }
+
+  function formatK(k) {
+    return k === 'unset' || k === null ? 'Not set' : Number(k).toLocaleString(undefined, { maximumFractionDigits: 5 });
+  }
+
+  function formatTime(s) {
+    if (!s || !Number.isFinite(s)) return '—';
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = Math.floor(s % 60);
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  }
+
+  function updateLayerText() {
+    if (!data) { layerText.textContent = '—'; return; }
+    const l = data.layers[selectedLayer];
+    const z = l && l.z != null ? ` Z ${l.z.toFixed(3)} mm` : '';
+    const kValues = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
+    const k = kValues.length ? ` | K ${kValues.map(formatK).join(', ')}` : '';
+    layerText.textContent = `${selectedLayer + 1} / ${data.layers.length}${z}${k}`;
+  }
+
+  function resetView() {
+    if (!data) return;
+    const r = wrap.getBoundingClientRect();
+    const b = data.bounds;
+    const w = Math.max(1, b.maxX - b.minX);
+    const h = Math.max(1, b.maxY - b.minY);
+    const pad = 60;
+    view.scale = Math.min((r.width - pad) / w, (r.height - pad) / h);
+    if (!Number.isFinite(view.scale) || view.scale <= 0) view.scale = 1;
+    view.ox = r.width / 2 - ((b.minX + b.maxX) / 2) * view.scale;
+    view.oy = r.height / 2 + ((b.minY + b.maxY) / 2) * view.scale;
+    draw();
+  }
+
+  function worldToScreen(x, y) {
+    return [x * view.scale + view.ox, -y * view.scale + view.oy];
+  }
+
+  function isoToScreen(x, y, z) {
+    const ix = (x - y) * 0.72;
+    const iy = (x + y) * 0.36 - z * 4.5;
+    return [ix * view.scale + view.ox, iy * view.scale + view.oy];
+  }
+
+  function drawGrid() {
+    if (!data || !showGrid.checked) return;
+    const b = data.bounds;
+    const step = chooseGridStep((b.maxX - b.minX) / 10);
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = getCSS('--grid');
+    ctx.globalAlpha = 0.85;
+
+    const x0 = Math.floor(b.minX / step) * step;
+    const x1 = Math.ceil(b.maxX / step) * step;
+    const y0 = Math.floor(b.minY / step) * step;
+    const y1 = Math.ceil(b.maxY / step) * step;
+
+    for (let x = x0; x <= x1; x += step) {
+      const [sx1, sy1] = worldToScreen(x, y0);
+      const [sx2, sy2] = worldToScreen(x, y1);
+      ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(sx2, sy2); ctx.stroke();
+    }
+    for (let y = y0; y <= y1; y += step) {
+      const [sx1, sy1] = worldToScreen(x0, y);
+      const [sx2, sy2] = worldToScreen(x1, y);
+      ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(sx2, sy2); ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(232,238,249,.55)';
+    ctx.lineWidth = 2;
+    const corners = [
+      worldToScreen(b.minX,b.minY), worldToScreen(b.maxX,b.minY),
+      worldToScreen(b.maxX,b.maxY), worldToScreen(b.minX,b.maxY)
+    ];
+    ctx.beginPath();
+    ctx.moveTo(corners[0][0], corners[0][1]);
+    for (let i=1;i<corners.length;i++) ctx.lineTo(corners[i][0], corners[i][1]);
+    ctx.closePath(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function chooseGridStep(raw) {
+    const steps = [1,2,5,10,20,25,50,100,200];
+    return steps.find(s => s >= raw) || 200;
+  }
+
+  function getCSS(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function speedColor(f) {
+    if (!data || data.maxF <= data.minF) return getCSS('--extrude');
+    const t = Math.max(0, Math.min(1, (f - data.minF) / (data.maxF - data.minF)));
+    const hue = 190 - t * 140; // cyan to red-ish
+    return `hsl(${hue}, 85%, 65%)`;
+  }
+
+  function kColor(k) {
+    if (k === null || k === 'unset') return getCSS('--unset');
+    if (!data) return getCSS('--extrude');
+    const values = data.extrusionKValues.filter(v => v !== 'unset');
+    const idx = values.findIndex(v => Number(v) === Number(k));
+    if (idx < 0) return getCSS('--extrude');
+    const palette = [185, 42, 278, 115, 12, 220, 330, 75, 155, 0];
+    const hue = palette[idx % palette.length];
+    return `hsl(${hue}, 86%, 63%)`;
+  }
+
+  function updateKLegend() {
+    if (!data || !colorK.checked) {
+      kLegend.hidden = true;
+      kLegend.innerHTML = '';
+      return;
+    }
+    kLegend.hidden = false;
+    const values = data.extrusionKValues.length ? data.extrusionKValues : ['unset'];
+    kLegend.innerHTML = `<span class="title">Linear Advance K value on extrusion moves</span>` +
+      values.map(k => `<span class="leg"><span class="sw k" style="background:${kColor(k)}"></span>K ${formatK(k)}</span>`).join('');
+  }
+
+  function drawMoves(moves, alpha=1, isIso=false) {
+    const extrudeColour = getCSS('--extrude');
+    const travelColour = getCSS('--travel');
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const type of ['travel','extrude']) {
+      if (type === 'extrude' && !showExtrude.checked) continue;
+      if (type === 'travel' && !showTravel.checked) continue;
+
+      const filtered = moves.filter(m => type === 'extrude' ? m.extrude : !m.extrude);
+      if (!filtered.length) continue;
+
+      ctx.globalAlpha = type === 'travel' ? alpha * 0.42 : alpha;
+      ctx.lineWidth = type === 'travel' ? 1 : Math.max(1.4, Math.min(3.8, view.scale * 0.055));
+      ctx.strokeStyle = type === 'travel' ? travelColour : extrudeColour;
+
+      if (colorK.checked && type === 'extrude') {
+        for (const m of filtered) drawSingleMove(m, kColor(m.k), isIso);
+      } else if (colorSpeed.checked && type === 'extrude') {
+        for (const m of filtered) drawSingleMove(m, speedColor(m.f), isIso);
+      } else {
+        ctx.beginPath();
+        for (const m of filtered) {
+          const a = isIso ? isoToScreen(m.x1,m.y1,m.z1) : worldToScreen(m.x1,m.y1);
+          const b = isIso ? isoToScreen(m.x2,m.y2,m.z2) : worldToScreen(m.x2,m.y2);
+          ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawSingleMove(m, strokeStyle, isIso) {
+    ctx.strokeStyle = strokeStyle;
+    ctx.beginPath();
+    const a = isIso ? isoToScreen(m.x1,m.y1,m.z1) : worldToScreen(m.x1,m.y1);
+    const b = isIso ? isoToScreen(m.x2,m.y2,m.z2) : worldToScreen(m.x2,m.y2);
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+  }
+
+  function draw() {
+    const r = wrap.getBoundingClientRect();
+    ctx.clearRect(0, 0, r.width, r.height);
+    if (!data) return;
+
+    if (mode.value !== 'iso') drawGrid();
+
+    if (mode.value === 'all') {
+      drawMoves(data.moves, 1, false);
+    } else if (mode.value === 'upToLayer') {
+      for (let i = 0; i <= selectedLayer; i++) {
+        const alpha = fadeOld.checked ? (0.12 + 0.88 * (i / Math.max(1, selectedLayer))) : 1;
+        drawMoves(data.layers[i]?.moves || [], alpha, false);
+      }
+    } else if (mode.value === 'iso') {
+      for (let i = 0; i <= selectedLayer; i++) {
+        const alpha = fadeOld.checked ? (0.08 + 0.92 * (i / Math.max(1, selectedLayer))) : 1;
+        drawMoves(data.layers[i]?.moves || [], alpha, true);
+      }
+    } else {
+      drawMoves(data.layers[selectedLayer]?.moves || [], 1, false);
+    }
+
+    drawOverlay();
+  }
+
+  function drawOverlay() {
+    if (!data) return;
+    const r = wrap.getBoundingClientRect();
+    ctx.save();
+    ctx.fillStyle = 'rgba(10,15,24,.68)';
+    ctx.strokeStyle = 'rgba(125,211,252,.18)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, 14, 14, 270, 72, 12);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#e8eef9';
+    ctx.font = '700 13px system-ui, sans-serif';
+    ctx.fillText(data.fileName || 'G-code', 28, 38);
+    ctx.fillStyle = '#9aa7bd';
+    ctx.font = '12px system-ui, sans-serif';
+    const l = data.layers[selectedLayer] || {};
+    const visibleK = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
+    const kSummary = visibleK.length ? `  |  K ${visibleK.map(formatK).join(', ')}` : '';
+    ctx.fillText(`Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves${kSummary}`, 28, 58);
+    ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 76);
+    ctx.restore();
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function updateSearch() {
+    if (!rawLines.length) {
+      searchResults.textContent = 'Load a file, then search for commands.';
+      return;
+    }
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) {
+      searchResults.textContent = 'Type something to search, e.g. M106, G92, ;LAYER, M900, retract.';
+      return;
+    }
+    const hits = [];
+    for (let i = 0; i < rawLines.length && hits.length < 80; i++) {
+      if (rawLines[i].toLowerCase().includes(q)) {
+        hits.push(`${i+1}: ${rawLines[i]}`);
+      }
+    }
+    searchResults.textContent = hits.length ? hits.join('\n') : 'No matches found.';
+  }
+
+  async function handleFile(file) {
+    if (!file) return;
+    parseText.textContent = 'Reading file...';
+    bar.style.width = '0%';
+    statusEl.textContent = `Opening ${file.name}...`;
+    try {
+      const text = await file.text();
+      await parseGcode(text, file.name);
+    } catch (err) {
+      console.error(err);
+      statusEl.innerHTML = `<span class="warn">${err.message || err}</span>`;
+      parseText.textContent = 'Error';
+    }
+  }
+
+  function loadSample() {
+    const sample = [
+      ';SAMPLE simple calibration cube-ish path',
+      'G21',
+      'G90',
+      'M82',
+      'G92 E0',
+      'G1 Z0.2 F1200',
+      'M900 K0.02',
+      'G1 X10 Y10 F6000',
+      'G1 X50 Y10 E2 F1200',
+      'G1 X50 Y50 E4',
+      'G1 X10 Y50 E6',
+      'G1 X10 Y10 E8',
+      'G0 X20 Y20 F6000',
+      'G1 X40 Y20 E9.2 F1500',
+      'G1 X40 Y40 E10.4',
+      'G1 X20 Y40 E11.6',
+      'G1 X20 Y20 E12.8',
+      ';LAYER:1',
+      'G1 Z0.4 F1200',
+      'M900 K0.08',
+      'G0 X12 Y12 F6000',
+      'G1 X48 Y12 E14.4 F1200',
+      'G1 X48 Y48 E16',
+      'G1 X12 Y48 E17.6',
+      'G1 X12 Y12 E19.2',
+      ';LAYER:2',
+      'G1 Z0.6 F1200',
+      'M900 K0.14',
+      'G0 X15 Y15 F6000',
+      'G1 X45 Y15 E20.7 F1200',
+      'G1 X45 Y45 E22.2',
+      'G1 X15 Y45 E23.7',
+      'G1 X15 Y15 E25.2'
+    ].join('\n');
+    parseGcode(sample, 'sample.gcode');
+  }
+
+  fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+  sampleBtn.addEventListener('click', loadSample);
+  resetBtn.addEventListener('click', resetView);
+  layerSlider.addEventListener('input', e => {
+    selectedLayer = Number(e.target.value);
+    updateLayerText();
+    draw();
+  });
+  [mode, showExtrude, showTravel, showGrid, fadeOld].forEach(el => el.addEventListener('change', draw));
+  colorSpeed.addEventListener('change', () => {
+    if (colorSpeed.checked) colorK.checked = false;
+    updateKLegend();
+    draw();
+  });
+  colorK.addEventListener('change', () => {
+    if (colorK.checked) colorSpeed.checked = false;
+    updateKLegend();
+    draw();
+  });
+  searchInput.addEventListener('input', updateSearch);
+
+  wrap.addEventListener('dragenter', e => { e.preventDefault(); drop.style.display = 'flex'; });
+  wrap.addEventListener('dragover', e => { e.preventDefault(); drop.style.display = 'flex'; });
+  wrap.addEventListener('dragleave', e => { e.preventDefault(); drop.style.display = 'none'; });
+  wrap.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.style.display = 'none';
+    handleFile(e.dataTransfer.files[0]);
+  });
+
+  canvas.addEventListener('mousedown', e => {
+    dragging = true;
+    lastMouse = { x:e.clientX, y:e.clientY };
+  });
+  window.addEventListener('mouseup', () => dragging = false);
+  window.addEventListener('mousemove', e => {
+    if (!dragging || !lastMouse) return;
+    view.ox += e.clientX - lastMouse.x;
+    view.oy += e.clientY - lastMouse.y;
+    lastMouse = { x:e.clientX, y:e.clientY };
+    draw();
+  });
+  canvas.addEventListener('wheel', e => {
+    if (!data) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const beforeX = (mx - view.ox) / view.scale;
+    const beforeY = -(my - view.oy) / view.scale;
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    view.scale *= factor;
+    view.scale = Math.max(0.02, Math.min(250, view.scale));
+    view.ox = mx - beforeX * view.scale;
+    view.oy = my + beforeY * view.scale;
+    draw();
+  }, { passive:false });
+
+  window.addEventListener('resize', fitCanvas);
+  fitCanvas();
+})();
+</script>
+</body>
+</html>
