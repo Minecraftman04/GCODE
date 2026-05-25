@@ -423,6 +423,7 @@
         <label><input type="checkbox" id="showTravel" checked> Show travel moves</label>
         <label><input type="checkbox" id="showGrid" checked> Show bed grid</label>
         <label><input type="checkbox" id="fadeOld" checked> Fade previous layers</label>
+        <label><input type="checkbox" id="realLineWidth"> Realistic extrusion line thickness</label>
         <label><input type="checkbox" id="colorSpeed"> Colour extrusion by speed</label>
         <label><input type="checkbox" id="colorK"> Colour extrusion by Linear Advance K</label>
       </div>
@@ -512,6 +513,7 @@
         K scripts that insert a new K value on each layer. Choose a palette above, and use
         <strong>All layers</strong> or <strong>3D-ish preview</strong> to see the gradient through the print.
         Playback can also simulate Marlin-style acceleration and Classic Jerk timing.
+        Enable <strong>Realistic extrusion line thickness</strong> to draw extrusion moves at an estimated physical width based on extrusion amount, move length, layer height and 1.75&nbsp;mm filament unless <code>M200 D…</code> specifies another diameter.
       </div>
     </div>
   </aside>
@@ -586,6 +588,7 @@
   const showTravel = document.getElementById('showTravel');
   const showGrid = document.getElementById('showGrid');
   const fadeOld = document.getElementById('fadeOld');
+  const realLineWidth = document.getElementById('realLineWidth');
   const colorSpeed = document.getElementById('colorSpeed');
   const colorK = document.getElementById('colorK');
   const kPalette = document.getElementById('kPalette');
@@ -702,6 +705,8 @@
     let explicitLayerSeen = false;
     let totalExtrusion = 0;
     let currentK = null;
+    let filamentDiameter = 1.75;
+    let volumetricExtrusion = false;
     const kChanges = [];
     const motionCodesSeen = new Set();
     let motion = {
@@ -762,6 +767,14 @@
       else if (cmd === 'M900' && 'K' in p && Number.isFinite(p.K)) {
         currentK = p.K;
         kChanges.push({ k: currentK, line: i + 1, layer: currentLayer, raw });
+      }
+      else if (cmd === 'M200' && 'D' in p && Number.isFinite(p.D)) {
+        if (p.D > 0) {
+          filamentDiameter = p.D * units;
+          volumetricExtrusion = true;
+        } else {
+          volumetricExtrusion = false;
+        }
       }
       else if (cmd === 'M201') {
         let changed = false;
@@ -853,6 +866,7 @@
             x1: old.x, y1: old.y, z1: old.z,
             x2: nx, y2: ny, z2: nz,
             dx, dy, dz, dist, eDelta: de, f: nf, k: currentK,
+            filamentDiameter, volumetricExtrusion, lineWidthMm: null,
             motion: cloneMotion(motion),
             durationS: 0, startTimeS: 0, endTimeS: 0,
             extrude: isExtrude, retract: isRetract,
@@ -890,8 +904,10 @@
       totalExtrusion, estimatedSeconds: 0,
       kChanges, extrusionKValues, minK, maxK, motionCodesSeen: [...motionCodesSeen],
       hasJunctionDeviation: moves.some(m => Number.isFinite(m.motion.junctionDeviation)),
-      minF: Number.isFinite(minF) ? minF : 0, maxF
+      minF: Number.isFinite(minF) ? minF : 0, maxF,
+      minLineWidth: null, maxLineWidth: null, medianLineWidth: null
     };
+    annotateRealLineWidths(data);
     selectedLayer = Math.max(0, layers.length - 1);
     empty.style.display = 'none';
     resetBtn.disabled = false;
@@ -906,6 +922,71 @@
     updateSearch();
     statusEl.textContent = fileName;
     resetView();
+  }
+
+  function median(values) {
+    const sorted = values.filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  function moveExtrusionVolumeMm3(m) {
+    if (!m.extrude || !(m.eDelta > 0)) return 0;
+    if (m.volumetricExtrusion) return m.eDelta;
+    const diameter = Number.isFinite(m.filamentDiameter) && m.filamentDiameter > 0 ? m.filamentDiameter : 1.75;
+    const radius = diameter / 2;
+    return m.eDelta * Math.PI * radius * radius;
+  }
+
+  function annotateRealLineWidths(dataset) {
+    if (!dataset || !dataset.moves.length) return;
+    const fallbackLayerHeight = 0.2;
+    const fallbackLineWidth = 0.4;
+    const layerZ = dataset.layers.map(layer => {
+      const zValues = (layer.moves || []).filter(m => m.extrude && Number.isFinite(m.z2)).map(m => m.z2);
+      return zValues.length ? median(zValues) : null;
+    });
+    const candidateHeights = [];
+    let previousZ = null;
+    for (const z of layerZ) {
+      if (!Number.isFinite(z)) continue;
+      const h = previousZ === null ? z : z - previousZ;
+      if (h >= 0.03 && h <= 2.0) candidateHeights.push(h);
+      previousZ = z;
+    }
+    const commonLayerHeight = median(candidateHeights) || fallbackLayerHeight;
+    const layerHeights = [];
+    previousZ = null;
+    for (let i = 0; i < layerZ.length; i++) {
+      const z = layerZ[i];
+      let h = null;
+      if (Number.isFinite(z)) {
+        h = previousZ === null ? z : z - previousZ;
+        previousZ = z;
+      }
+      layerHeights[i] = (Number.isFinite(h) && h >= 0.03 && h <= 2.0) ? h : commonLayerHeight;
+    }
+
+    const widths = [];
+    for (const m of dataset.moves) {
+      if (!m.extrude) {
+        m.lineWidthMm = null;
+        continue;
+      }
+      const planarDist = Math.hypot(m.dx || 0, m.dy || 0) || m.dist;
+      const layerHeight = layerHeights[m.layer] || commonLayerHeight || fallbackLayerHeight;
+      const volume = moveExtrusionVolumeMm3(m);
+      const rawWidth = volume > 0 && planarDist > 0 && layerHeight > 0 ? volume / (planarDist * layerHeight) : fallbackLineWidth;
+      const width = Number.isFinite(rawWidth) ? Math.max(0.05, Math.min(8, rawWidth)) : fallbackLineWidth;
+      m.lineWidthMm = width;
+      widths.push(width);
+    }
+    if (widths.length) {
+      dataset.minLineWidth = Math.min(...widths);
+      dataset.maxLineWidth = Math.max(...widths);
+      dataset.medianLineWidth = median(widths);
+    }
   }
 
   function moveAxisFraction(m, deltaKey) {
@@ -1304,13 +1385,17 @@
       if (!filtered.length) continue;
 
       ctx.globalAlpha = type === 'travel' ? alpha * 0.42 : alpha;
-      ctx.lineWidth = type === 'travel' ? 1 : Math.max(1.4, Math.min(3.8, view.scale * 0.055));
+      ctx.lineWidth = type === 'travel' ? 1 : fixedExtrusionStrokeWidth();
       ctx.strokeStyle = type === 'travel' ? travelColour : extrudeColour;
 
-      if (colorK.checked && type === 'extrude') {
-        for (const m of filtered) drawSingleMove(m, kColor(m.k), isIso);
-      } else if (colorSpeed.checked && type === 'extrude') {
-        for (const m of filtered) drawSingleMove(m, speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60), isIso);
+      const needsPerMoveExtrusion = type === 'extrude' && (colorK.checked || colorSpeed.checked || realLineWidth.checked);
+      if (needsPerMoveExtrusion) {
+        for (const m of filtered) {
+          ctx.lineWidth = extrusionStrokeWidth(m);
+          if (colorK.checked) drawSingleMove(m, kColor(m.k), isIso);
+          else if (colorSpeed.checked) drawSingleMove(m, speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60), isIso);
+          else drawSingleMove(m, extrudeColour, isIso);
+        }
       } else {
         ctx.beginPath();
         for (const m of filtered) {
@@ -1322,6 +1407,19 @@
       }
     }
     ctx.restore();
+  }
+
+  function fixedExtrusionStrokeWidth() {
+    return Math.max(1.4, Math.min(3.8, view.scale * 0.055));
+  }
+
+  function realisticExtrusionStrokeWidth(m) {
+    const widthMm = Number.isFinite(m.lineWidthMm) ? m.lineWidthMm : 0.4;
+    return Math.max(0.25, Math.min(80, widthMm * view.scale));
+  }
+
+  function extrusionStrokeWidth(m) {
+    return realLineWidth.checked ? realisticExtrusionStrokeWidth(m) : fixedExtrusionStrokeWidth();
   }
 
   function drawSingleMove(m, strokeStyle, isIso) {
@@ -1409,7 +1507,7 @@
     };
     ctx.save();
     ctx.globalAlpha = m.extrude ? 1 : 0.42;
-    ctx.lineWidth = m.extrude ? Math.max(1.4, Math.min(3.8, view.scale * 0.055)) : 1;
+    ctx.lineWidth = m.extrude ? extrusionStrokeWidth(m) : 1;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     drawSingleMove(partial, colourForMove(m), isIso);
@@ -1672,7 +1770,7 @@
     updateLayerText();
     draw();
   });
-  [mode, showExtrude, showTravel, showGrid, fadeOld].forEach(el => el.addEventListener('change', draw));
+  [mode, showExtrude, showTravel, showGrid, fadeOld, realLineWidth].forEach(el => el.addEventListener('change', draw));
   colorSpeed.addEventListener('change', () => {
     if (colorSpeed.checked) colorK.checked = false;
     updateKLegend();
