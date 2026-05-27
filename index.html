@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local G-code Viewer – Rainbow Linear Advance K + Marlin Motion Playback</title>
+<title>Local G-code Viewer – K + Nozzle Temperature Colour + Marlin Motion Playback</title>
 <style>
   :root{
     --bg:#0e1117;
@@ -396,7 +396,7 @@
 </head>
 <body>
 <header>
-  <h1>Local G-code Viewer – Rainbow K + Motion Playback</h1>
+  <h1>Local G-code Viewer – K + Nozzle Temperature Colour + Motion Playback</h1>
   <span class="badge">offline</span>
   <label class="fileLabel" for="fileInput">Open GCODE</label>
   <input id="fileInput" type="file" accept=".gcode,.gc,.gco,.nc,.txt">
@@ -426,6 +426,7 @@
         <label><input type="checkbox" id="realLineWidth"> Realistic extrusion line thickness</label>
         <label><input type="checkbox" id="colorSpeed"> Colour extrusion by speed</label>
         <label><input type="checkbox" id="colorK"> Colour extrusion by Linear Advance K</label>
+        <label><input type="checkbox" id="colorTemp"> Colour extrusion by nozzle temperature</label>
       </div>
       <div class="kPaletteRow">
         <label for="kPalette">K palette</label>
@@ -436,11 +437,21 @@
           <option value="icefire">Ice to fire</option>
         </select>
       </div>
+      <div class="kPaletteRow">
+        <label for="tempPalette">Temp palette</label>
+        <select id="tempPalette" aria-label="Nozzle temperature colour palette">
+          <option value="icefire" selected>Ice to fire</option>
+          <option value="rainbow">Rainbow spectrum</option>
+          <option value="aurora">Aurora</option>
+          <option value="sunset">Sunset</option>
+        </select>
+      </div>
       <div class="legend">
         <span class="leg"><span class="sw ex"></span>Extrusion</span>
         <span class="leg"><span class="sw tr"></span>Travel</span>
       </div>
       <div id="kLegend" class="kLegend" hidden></div>
+      <div id="tempLegend" class="kLegend" hidden></div>
     </div>
 
     <div class="panel">
@@ -454,6 +465,8 @@
         <div class="stat"><div class="k">Est. time</div><div class="v" id="timeStat">—</div></div>
         <div class="stat"><div class="k">K values used</div><div class="v" id="kValuesStat">—</div></div>
         <div class="stat"><div class="k">K changes</div><div class="v" id="kChangesStat">—</div></div>
+        <div class="stat"><div class="k">Nozzle temps used</div><div class="v" id="tempValuesStat">—</div></div>
+        <div class="stat"><div class="k">Temp commands</div><div class="v" id="tempChangesStat">—</div></div>
         <div class="stat"><div class="k">Timing model</div><div class="v compact" id="motionModelStat">—</div></div>
         <div class="stat"><div class="k">M-codes found</div><div class="v compact" id="motionCodesStat">—</div></div>
       </div>
@@ -509,8 +522,10 @@
         Drag a `.gcode` file onto the viewer or press <strong>Open GCODE</strong>.
         Use the layer slider at the bottom. Mouse wheel zooms, left-drag pans.
         Enable <strong>Colour extrusion by Linear Advance K</strong> to show
-        <code>M900 K…</code> values as a smooth colour ramp. This is designed for height-varying
-        K scripts that insert a new K value on each layer. Choose a palette above, and use
+        <code>M900 K…</code> values as a smooth colour ramp, or enable
+        <strong>Colour extrusion by nozzle temperature</strong> to show the most recent commanded nozzle
+        target from <code>M104 S…</code> and <code>M109 S…/R…</code> on each extrusion move.
+        These modes are designed for height-varying test prints. Choose a palette above, and use
         <strong>All layers</strong> or <strong>3D-ish preview</strong> to see the gradient through the print.
         Playback can also simulate Marlin-style acceleration and Classic Jerk timing. In <strong>3D-ish preview</strong>, the printer origin <code>(0,0,0)</code> is oriented at the front/lower-left, with +X to the right and +Y towards the rear.
         Enable <strong>Realistic extrusion line thickness</strong> to draw extrusion moves at an estimated physical width based on extrusion amount, move length, layer height and 1.75&nbsp;mm filament unless <code>M200 D…</code> specifies another diameter.
@@ -591,8 +606,11 @@
   const realLineWidth = document.getElementById('realLineWidth');
   const colorSpeed = document.getElementById('colorSpeed');
   const colorK = document.getElementById('colorK');
+  const colorTemp = document.getElementById('colorTemp');
   const kPalette = document.getElementById('kPalette');
+  const tempPalette = document.getElementById('tempPalette');
   const kLegend = document.getElementById('kLegend');
+  const tempLegend = document.getElementById('tempLegend');
   const playBtn = document.getElementById('playBtn');
   const restartPlayBtn = document.getElementById('restartPlayBtn');
   const exitPlaybackBtn = document.getElementById('exitPlaybackBtn');
@@ -634,6 +652,8 @@
     time: document.getElementById('timeStat'),
     kValues: document.getElementById('kValuesStat'),
     kChanges: document.getElementById('kChangesStat'),
+    tempValues: document.getElementById('tempValuesStat'),
+    tempChanges: document.getElementById('tempChangesStat'),
     motionModel: document.getElementById('motionModelStat'),
     motionCodes: document.getElementById('motionCodesStat'),
   };
@@ -705,9 +725,11 @@
     let explicitLayerSeen = false;
     let totalExtrusion = 0;
     let currentK = null;
+    let currentNozzleTemp = null;
     let filamentDiameter = 1.75;
     let volumetricExtrusion = false;
     const kChanges = [];
+    const tempChanges = [];
     const motionCodesSeen = new Set();
     let motion = {
       printAccel: null,
@@ -767,6 +789,13 @@
       else if (cmd === 'M900' && 'K' in p && Number.isFinite(p.K)) {
         currentK = p.K;
         kChanges.push({ k: currentK, line: i + 1, layer: currentLayer, raw });
+      }
+      else if ((cmd === 'M104' || cmd === 'M109') && (('S' in p) || ('R' in p))) {
+        const requestedTemp = ('S' in p) ? p.S : p.R;
+        if (Number.isFinite(requestedTemp)) {
+          currentNozzleTemp = requestedTemp;
+          tempChanges.push({ temperature: currentNozzleTemp, command: cmd, line: i + 1, layer: currentLayer, raw });
+        }
       }
       else if (cmd === 'M200' && 'D' in p && Number.isFinite(p.D)) {
         if (p.D > 0) {
@@ -865,7 +894,7 @@
           const move = {
             x1: old.x, y1: old.y, z1: old.z,
             x2: nx, y2: ny, z2: nz,
-            dx, dy, dz, dist, eDelta: de, f: nf, k: currentK,
+            dx, dy, dz, dist, eDelta: de, f: nf, k: currentK, temperature: currentNozzleTemp,
             filamentDiameter, volumetricExtrusion, lineWidthMm: null,
             motion: cloneMotion(motion),
             durationS: 0, startTimeS: 0, endTimeS: 0,
@@ -901,11 +930,20 @@
       minK = minK === null ? k : Math.min(minK, k);
       maxK = maxK === null ? k : Math.max(maxK, k);
     }
+    const extrusionTemps = [...new Set(moves.filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
+    const numericTemps = extrusionTemps.filter(t => t !== 'unset' && Number.isFinite(Number(t))).map(Number);
+    let minTemp = null, maxTemp = null;
+    for (const t of numericTemps) {
+      minTemp = minTemp === null ? t : Math.min(minTemp, t);
+      maxTemp = maxTemp === null ? t : Math.max(maxTemp, t);
+    }
     data = {
       fileName, moves, layers,
       bounds: { minX, minY, minZ, maxX, maxY, maxZ },
       totalExtrusion, estimatedSeconds: 0,
-      kChanges, extrusionKValues, minK, maxK, motionCodesSeen: [...motionCodesSeen],
+      kChanges, extrusionKValues, minK, maxK,
+      tempChanges, extrusionTemps, minTemp, maxTemp,
+      motionCodesSeen: [...motionCodesSeen],
       hasJunctionDeviation: moves.some(m => Number.isFinite(m.motion.junctionDeviation)),
       minF: Number.isFinite(minF) ? minF : 0, maxF,
       minLineWidth: null, maxLineWidth: null, medianLineWidth: null
@@ -1171,14 +1209,21 @@
     statsEls.time.textContent = formatTime(data.estimatedSeconds);
     statsEls.kValues.textContent = kRangeSummary();
     statsEls.kChanges.textContent = data.kChanges.length.toLocaleString();
+    statsEls.tempValues.textContent = tempRangeSummary();
+    statsEls.tempChanges.textContent = data.tempChanges.length.toLocaleString();
     statsEls.motionModel.textContent = data.timingMode || '—';
     statsEls.motionCodes.textContent = data.motionCodesSeen?.length ? data.motionCodesSeen.join(', ') : 'Fallbacks';
     updateKLegend();
+    updateTempLegend();
     updateLayerText();
   }
 
   function formatK(k) {
     return k === 'unset' || k === null ? 'Not set' : Number(k).toLocaleString(undefined, { maximumFractionDigits: 5 });
+  }
+
+  function formatTemp(t) {
+    return t === 'unset' || t === null ? 'Not set' : `${Number(t).toLocaleString(undefined, { maximumFractionDigits: 1 })} °C`;
   }
 
   function kRangeSummary() {
@@ -1189,6 +1234,18 @@
     const range = data.minK === data.maxK
       ? formatK(data.minK)
       : `${formatK(data.minK)} → ${formatK(data.maxK)}`;
+    const count = numericCount > 1 ? ` (${numericCount} values)` : '';
+    return `${hasUnset ? 'Unset + ' : ''}${range}${count}`;
+  }
+
+  function tempRangeSummary() {
+    if (!data || !data.extrusionTemps.length) return '—';
+    const numericCount = data.extrusionTemps.filter(t => t !== 'unset').length;
+    const hasUnset = data.extrusionTemps.includes('unset');
+    if (!numericCount) return 'Not set';
+    const range = data.minTemp === data.maxTemp
+      ? formatTemp(data.minTemp)
+      : `${formatTemp(data.minTemp)} → ${formatTemp(data.maxTemp)}`;
     const count = numericCount > 1 ? ` (${numericCount} values)` : '';
     return `${hasUnset ? 'Unset + ' : ''}${range}${count}`;
   }
@@ -1208,8 +1265,10 @@
     const l = data.layers[selectedLayer];
     const z = l && l.z != null ? ` Z ${l.z.toFixed(3)} mm` : '';
     const kValues = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
+    const temps = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
     const k = kValues.length ? ` | K ${kValues.map(formatK).join(', ')}` : '';
-    layerText.textContent = `${selectedLayer + 1} / ${data.layers.length}${z}${k}`;
+    const temp = temps.length ? ` | Nozzle ${temps.map(formatTemp).join(', ')}` : '';
+    layerText.textContent = `${selectedLayer + 1} / ${data.layers.length}${z}${k}${temp}`;
   }
 
   // 3D-ish view orientation: the printer's front-left build-plate origin remains
@@ -1366,12 +1425,15 @@
     return kPalettes[kPalette.value] || kPalettes.rainbow;
   }
 
+  function selectedTempPalette() {
+    return kPalettes[tempPalette.value] || kPalettes.icefire;
+  }
+
   function kGradientCSS() {
     return `linear-gradient(90deg, ${selectedKPalette().stops.map(([at, colour]) => `${colour} ${at * 100}%`).join(', ')})`;
   }
 
-  function paletteColor(t) {
-    const stops = selectedKPalette().stops;
+  function colourFromStops(stops, t) {
     const value = Math.max(0, Math.min(1, t));
     for (let i = 1; i < stops.length; i++) {
       if (value <= stops[i][0]) {
@@ -1384,11 +1446,30 @@
     return stops[stops.length - 1][1];
   }
 
+  function paletteColor(t) {
+    return colourFromStops(selectedKPalette().stops, t);
+  }
+
+  function tempGradientCSS() {
+    return `linear-gradient(90deg, ${selectedTempPalette().stops.map(([at, colour]) => `${colour} ${at * 100}%`).join(', ')})`;
+  }
+
+  function tempPaletteColor(t) {
+    return colourFromStops(selectedTempPalette().stops, t);
+  }
+
   function kColor(k) {
     if (k === null || k === 'unset') return getCSS('--unset');
     if (!data || data.minK === null || data.maxK === null) return getCSS('--extrude');
     if (data.maxK === data.minK) return paletteColor(0.5);
     return paletteColor((Number(k) - data.minK) / (data.maxK - data.minK));
+  }
+
+  function tempColor(temperature) {
+    if (temperature === null || temperature === 'unset') return getCSS('--unset');
+    if (!data || data.minTemp === null || data.maxTemp === null) return getCSS('--extrude');
+    if (data.maxTemp === data.minTemp) return tempPaletteColor(0.5);
+    return tempPaletteColor((Number(temperature) - data.minTemp) / (data.maxTemp - data.minTemp));
   }
 
   function updateKLegend() {
@@ -1415,6 +1496,30 @@
       `<div class="kLegendNote">${count.toLocaleString()} distinct K value${count === 1 ? '' : 's'} coloured continuously${hasUnset ? ' · Grey indicates extrusion before the first M900 K command.' : '.'}</div>`;
   }
 
+  function updateTempLegend() {
+    if (!data || !colorTemp.checked) {
+      tempLegend.hidden = true;
+      tempLegend.innerHTML = '';
+      return;
+    }
+    tempLegend.hidden = false;
+    const count = data.extrusionTemps.filter(t => t !== 'unset').length;
+    const hasUnset = data.extrusionTemps.includes('unset');
+    if (!count) {
+      tempLegend.innerHTML = `<span class="title">No commanded nozzle temperature is set on extrusion moves</span>`;
+      return;
+    }
+    const mid = data.minTemp + ((data.maxTemp - data.minTemp) / 2);
+    const rangeText = data.minTemp === data.maxTemp
+      ? formatTemp(data.minTemp)
+      : `${formatTemp(data.minTemp)} to ${formatTemp(data.maxTemp)}`;
+    tempLegend.innerHTML =
+      `<span class="title">${selectedTempPalette().label}: nozzle target ${rangeText}</span>` +
+      `<div class="kGradient" style="background:${tempGradientCSS()}"></div>` +
+      `<div class="kScale"><span>${formatTemp(data.minTemp)}</span><span>${formatTemp(mid)}</span><span>${formatTemp(data.maxTemp)}</span></div>` +
+      `<div class="kLegendNote">${count.toLocaleString()} distinct commanded temperature${count === 1 ? '' : 's'} coloured continuously${hasUnset ? ' · Grey indicates extrusion before the first M104/M109 temperature command.' : '.'}</div>`;
+  }
+
   function drawMoves(moves, alpha=1, isIso=false) {
     const extrudeColour = getCSS('--extrude');
     const travelColour = getCSS('--travel');
@@ -1434,11 +1539,12 @@
       ctx.lineWidth = type === 'travel' ? 1 : fixedExtrusionStrokeWidth();
       ctx.strokeStyle = type === 'travel' ? travelColour : extrudeColour;
 
-      const needsPerMoveExtrusion = type === 'extrude' && (colorK.checked || colorSpeed.checked || realLineWidth.checked);
+      const needsPerMoveExtrusion = type === 'extrude' && (colorK.checked || colorTemp.checked || colorSpeed.checked || realLineWidth.checked);
       if (needsPerMoveExtrusion) {
         for (const m of filtered) {
           ctx.lineWidth = extrusionStrokeWidth(m);
           if (colorK.checked) drawSingleMove(m, kColor(m.k), isIso);
+          else if (colorTemp.checked) drawSingleMove(m, tempColor(m.temperature), isIso);
           else if (colorSpeed.checked) drawSingleMove(m, speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60), isIso);
           else drawSingleMove(m, extrudeColour, isIso);
         }
@@ -1537,6 +1643,7 @@
   function colourForMove(m) {
     if (!m.extrude) return getCSS('--travel');
     if (colorK.checked) return kColor(m.k);
+    if (colorTemp.checked) return tempColor(m.temperature);
     if (colorSpeed.checked) return speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60);
     return getCSS('--extrude');
   }
@@ -1560,10 +1667,10 @@
     ctx.restore();
   }
 
-  function drawNozzleMarker(x, y, z, isIso, k) {
+  function drawNozzleMarker(x, y, z, isIso, k, temperature) {
     const p = isIso ? isoToScreen(x, y, z) : worldToScreen(x, y);
     ctx.save();
-    ctx.fillStyle = colorK.checked ? kColor(k) : getCSS('--accent');
+    ctx.fillStyle = colorK.checked ? kColor(k) : (colorTemp.checked ? tempColor(temperature) : getCSS('--accent'));
     ctx.strokeStyle = '#08111a';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -1595,13 +1702,14 @@
         current.y1 + (current.y2 - current.y1) * fraction,
         current.z1 + (current.z2 - current.z1) * fraction,
         isIso,
-        current.k
+        current.k,
+        current.temperature
       );
     } else if (completedAll.length) {
       const last = completedAll[completedAll.length - 1];
-      drawNozzleMarker(last.x2, last.y2, last.z2, isIso, last.k);
+      drawNozzleMarker(last.x2, last.y2, last.z2, isIso, last.k, last.temperature);
     } else if (current) {
-      drawNozzleMarker(current.x1, current.y1, current.z1, isIso, current.k);
+      drawNozzleMarker(current.x1, current.y1, current.z1, isIso, current.k, current.temperature);
     }
   }
 
@@ -1695,8 +1803,10 @@
     ctx.font = '12px system-ui, sans-serif';
     const l = data.layers[selectedLayer] || {};
     const visibleK = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
+    const visibleTemps = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
     const kSummary = visibleK.length ? `  |  K ${visibleK.map(formatK).join(', ')}` : '';
-    ctx.fillText(`Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves${kSummary}`, 28, 58);
+    const tempSummary = visibleTemps.length ? `  |  Nozzle ${visibleTemps.map(formatTemp).join(', ')}` : '';
+    ctx.fillText(`Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves${kSummary}${tempSummary}`, 28, 58);
     if (playback.active) {
       const state = playback.playing ? 'PLAYING' : (playback.timeS >= data.estimatedSeconds ? 'COMPLETE' : 'PAUSED');
       ctx.fillText(`${state}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×  |  ${data.timingMode}`, 28, 76);
@@ -1763,6 +1873,7 @@
       'M204 P800 T800',
       'M205 X8 Y8 Z0.4',
       'G1 Z0.2 F1200',
+      'M109 S225',
       'M900 K0.02',
       'G1 X10 Y10 F6000',
       'G1 X50 Y10 E2 F1200',
@@ -1776,6 +1887,7 @@
       'G1 X20 Y20 E12.8',
       ';LAYER:1',
       'G1 Z0.4 F1200',
+      'M104 S235',
       'M900 K0.08',
       'G0 X12 Y12 F6000',
       'G1 X48 Y12 E14.4 F1200',
@@ -1784,6 +1896,7 @@
       'G1 X12 Y12 E19.2',
       ';LAYER:2',
       'G1 Z0.6 F1200',
+      'M104 S245',
       'M900 K0.14',
       'G0 X15 Y15 F6000',
       'G1 X45 Y15 E20.7 F1200',
@@ -1819,17 +1932,38 @@
   mode.addEventListener('change', resetView);
   [showExtrude, showTravel, showGrid, fadeOld, realLineWidth].forEach(el => el.addEventListener('change', draw));
   colorSpeed.addEventListener('change', () => {
-    if (colorSpeed.checked) colorK.checked = false;
+    if (colorSpeed.checked) {
+      colorK.checked = false;
+      colorTemp.checked = false;
+    }
     updateKLegend();
+    updateTempLegend();
     draw();
   });
   colorK.addEventListener('change', () => {
-    if (colorK.checked) colorSpeed.checked = false;
+    if (colorK.checked) {
+      colorSpeed.checked = false;
+      colorTemp.checked = false;
+    }
     updateKLegend();
+    updateTempLegend();
+    draw();
+  });
+  colorTemp.addEventListener('change', () => {
+    if (colorTemp.checked) {
+      colorSpeed.checked = false;
+      colorK.checked = false;
+    }
+    updateKLegend();
+    updateTempLegend();
     draw();
   });
   kPalette.addEventListener('change', () => {
     updateKLegend();
+    draw();
+  });
+  tempPalette.addEventListener('change', () => {
+    updateTempLegend();
     draw();
   });
   motionModel.addEventListener('change', rebuildMotionTiming);
