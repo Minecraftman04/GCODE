@@ -427,6 +427,7 @@
         <label><input type="checkbox" id="colorSpeed"> Colour extrusion by speed</label>
         <label><input type="checkbox" id="colorK"> Colour extrusion by Linear Advance K</label>
         <label><input type="checkbox" id="colorTemp"> Colour extrusion by nozzle temperature</label>
+        <label><input type="checkbox" id="fastOverview" checked> Fast overview for very long multi-layer views</label>
       </div>
       <div class="kPaletteRow">
         <label for="kPalette">K palette</label>
@@ -531,6 +532,7 @@
         <strong>All layers</strong> or <strong>3D-ish preview</strong> to see the gradient through the print.
         Playback can also simulate Marlin-style acceleration and Classic Jerk timing. In <strong>3D-ish preview</strong>, the printer origin <code>(0,0,0)</code> is oriented at the front/lower-left, with +X to the right and +Y towards the rear.
         Enable <strong>Realistic extrusion line thickness</strong> to draw extrusion moves at an estimated physical width based on extrusion amount, move length, layer height and 1.75&nbsp;mm filament unless <code>M200 D…</code> specifies another diameter.
+        <strong>Fast overview</strong> automatically reduces only the display detail when an all-layer, 3D-ish, or playback view would contain hundreds of thousands of segments; current-layer views still draw at full detail. Untick it whenever you need every displayed segment.
       </div>
     </div>
   </aside>
@@ -609,6 +611,7 @@
   const colorSpeed = document.getElementById('colorSpeed');
   const colorK = document.getElementById('colorK');
   const colorTemp = document.getElementById('colorTemp');
+  const fastOverview = document.getElementById('fastOverview');
   const kPalette = document.getElementById('kPalette');
   const tempPalette = document.getElementById('tempPalette');
   const kLegend = document.getElementById('kLegend');
@@ -636,6 +639,10 @@
   let selectedLayer = 0;
   let view = { scale: 1, ox: 0, oy: 0 };
   let dragging = false, lastMouse = null;
+  let drawQueued = false;
+  let searchTimer = 0;
+  const renderState = { stride: 1, skipped: 0, drawn: 0 };
+  const MAX_OVERVIEW_SEGMENTS = 180000;
   let playback = {
     active: false,
     playing: false,
@@ -644,6 +651,22 @@
     raf: 0,
     lastFrameMs: 0
   };
+
+  function scheduleDraw() {
+    if (drawQueued) return;
+    drawQueued = true;
+    requestAnimationFrame(() => {
+      drawQueued = false;
+      draw();
+    });
+  }
+
+  function clearColourCaches() {
+    if (!data || !data.colourCache) return;
+    data.colourCache.k.clear();
+    data.colourCache.temp.clear();
+    data.colourCache.speed.clear();
+  }
 
   const statsEls = {
     layers: document.getElementById('layersStat'),
@@ -742,6 +765,16 @@
       junctionDeviation: null,
       feedPct: 100
     };
+    let previousMotionKey = '';
+    let sharedMotion = cloneMotion(motion);
+    function currentMotionSnapshot() {
+      const key = [motion.printAccel, motion.travelAccel, motion.maxAccel.x, motion.maxAccel.y, motion.maxAccel.z, motion.maxAccel.e, motion.maxFeed.x, motion.maxFeed.y, motion.maxFeed.z, motion.maxFeed.e, motion.jerk.x, motion.jerk.y, motion.jerk.z, motion.jerk.e, motion.junctionDeviation, motion.feedPct].join('|');
+      if (key !== previousMotionKey) {
+        previousMotionKey = key;
+        sharedMotion = cloneMotion(motion);
+      }
+      return sharedMotion;
+    }
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     let minF = Infinity, maxF = 0;
@@ -899,10 +932,10 @@
             x2: nx, y2: ny, z2: nz,
             dx, dy, dz, dist, eDelta: de, f: nf, k: currentK, temperature: currentNozzleTemp,
             filamentDiameter, volumetricExtrusion, lineWidthMm: null,
-            motion: cloneMotion(motion),
+            motion: currentMotionSnapshot(),
             durationS: 0, startTimeS: 0, endTimeS: 0,
             extrude: isExtrude, retract: isRetract,
-            line: i + 1, layer: currentLayer, raw
+            line: i + 1, layer: currentLayer
           };
           moves.push(move);
           ensureLayer(currentLayer, nz);
@@ -926,19 +959,39 @@
     await progress(total, total);
     if (!Number.isFinite(minX)) throw new Error('No G0/G1 moves found in this file.');
 
-    const extrusionKValues = [...new Set(moves.filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
-    const numericKValues = extrusionKValues.filter(k => k !== 'unset' && Number.isFinite(Number(k))).map(Number);
-    let minK = null, maxK = null;
-    for (const k of numericKValues) {
-      minK = minK === null ? k : Math.min(minK, k);
-      maxK = maxK === null ? k : Math.max(maxK, k);
+    const extrusionKSet = new Set();
+    const extrusionTempSet = new Set();
+    let minK = null, maxK = null, minTemp = null, maxTemp = null;
+    for (const layer of layers) {
+      layer.kSet = new Set();
+      layer.tempSet = new Set();
     }
-    const extrusionTemps = [...new Set(moves.filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
-    const numericTemps = extrusionTemps.filter(t => t !== 'unset' && Number.isFinite(Number(t))).map(Number);
-    let minTemp = null, maxTemp = null;
-    for (const t of numericTemps) {
-      minTemp = minTemp === null ? t : Math.min(minTemp, t);
-      maxTemp = maxTemp === null ? t : Math.max(maxTemp, t);
+    for (const m of moves) {
+      if (!m.extrude) continue;
+      const k = m.k === null ? 'unset' : m.k;
+      const temperature = m.temperature === null ? 'unset' : m.temperature;
+      extrusionKSet.add(k);
+      extrusionTempSet.add(temperature);
+      if (layers[m.layer]) {
+        layers[m.layer].kSet.add(k);
+        layers[m.layer].tempSet.add(temperature);
+      }
+      if (k !== 'unset' && Number.isFinite(Number(k))) {
+        minK = minK === null ? Number(k) : Math.min(minK, Number(k));
+        maxK = maxK === null ? Number(k) : Math.max(maxK, Number(k));
+      }
+      if (temperature !== 'unset' && Number.isFinite(Number(temperature))) {
+        minTemp = minTemp === null ? Number(temperature) : Math.min(minTemp, Number(temperature));
+        maxTemp = maxTemp === null ? Number(temperature) : Math.max(maxTemp, Number(temperature));
+      }
+    }
+    const extrusionKValues = [...extrusionKSet];
+    const extrusionTemps = [...extrusionTempSet];
+    for (const layer of layers) {
+      layer.kValues = [...layer.kSet];
+      layer.temps = [...layer.tempSet];
+      delete layer.kSet;
+      delete layer.tempSet;
     }
     data = {
       fileName, moves, layers,
@@ -949,9 +1002,9 @@
       motionCodesSeen: [...motionCodesSeen],
       hasJunctionDeviation: moves.some(m => Number.isFinite(m.motion.junctionDeviation)),
       minF: Number.isFinite(minF) ? minF : 0, maxF,
-      minLineWidth: null, maxLineWidth: null, medianLineWidth: null
+      minLineWidth: null, maxLineWidth: null, medianLineWidth: null, lineWidthsReady: false,
+      colourCache: { k: new Map(), temp: new Map(), speed: new Map() }
     };
-    annotateRealLineWidths(data);
     selectedLayer = Math.max(0, layers.length - 1);
     empty.style.display = 'none';
     resetBtn.disabled = false;
@@ -964,7 +1017,7 @@
     playback.speed = Number(playSpeed.value) || 1;
     rebuildMotionTiming();
     updateSearch();
-    statusEl.textContent = fileName;
+    statusEl.textContent = `${fileName}${moves.length >= MAX_OVERVIEW_SEGMENTS ? ' · long-file optimisations active' : ''}`;
     resetView();
   }
 
@@ -1036,6 +1089,12 @@
       dataset.maxLineWidth = maxWidth;
       dataset.medianLineWidth = median(widths);
     }
+  }
+
+  function ensureLineWidths() {
+    if (!data || data.lineWidthsReady) return;
+    annotateRealLineWidths(data);
+    data.lineWidthsReady = true;
   }
 
   function moveAxisFraction(m, deltaKey) {
@@ -1278,8 +1337,8 @@
     if (!data) { layerText.textContent = '—'; return; }
     const l = data.layers[selectedLayer];
     const z = l && l.z != null ? ` Z ${l.z.toFixed(3)} mm` : '';
-    const kValues = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
-    const temps = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
+    const kValues = l?.kValues || [];
+    const temps = l?.temps || [];
     const k = kValues.length ? ` | K ${compactValueSummary(kValues, formatK)}` : '';
     const temp = temps.length ? ` | Nozzle ${compactValueSummary(temps, formatTemp)}` : '';
     layerText.textContent = `${selectedLayer + 1} / ${data.layers.length}${z}${k}${temp}`;
@@ -1394,11 +1453,23 @@
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
 
+  function cachedColour(cacheName, key, producer) {
+    if (!data || !data.colourCache) return producer();
+    const cache = data.colourCache[cacheName];
+    if (cache.has(key)) return cache.get(key);
+    const colour = producer();
+    cache.set(key, colour);
+    return colour;
+  }
+
   function speedColor(f) {
     if (!data || data.maxF <= data.minF) return getCSS('--extrude');
-    const t = Math.max(0, Math.min(1, (f - data.minF) / (data.maxF - data.minF)));
-    const hue = 190 - t * 140; // cyan to red-ish
-    return `hsl(${hue}, 85%, 65%)`;
+    const rawT = Math.max(0, Math.min(1, (f - data.minF) / (data.maxF - data.minF)));
+    const bucket = Math.round(rawT * 63);
+    return cachedColour('speed', bucket, () => {
+      const hue = 190 - (bucket / 63) * 140; // cyan to red-ish
+      return `hsl(${hue}, 85%, 65%)`;
+    });
   }
 
   const kPalettes = {
@@ -1487,15 +1558,16 @@
   function kColor(k) {
     if (k === null || k === 'unset') return getCSS('--unset');
     if (!data || data.minK === null || data.maxK === null) return getCSS('--extrude');
-    if (data.maxK === data.minK) return paletteColor(0.5);
-    return paletteColor((Number(k) - data.minK) / (data.maxK - data.minK));
+    return cachedColour('k', k, () => data.maxK === data.minK
+      ? paletteColor(0.5)
+      : paletteColor((Number(k) - data.minK) / (data.maxK - data.minK)));
   }
 
   function tempColor(temperature) {
     if (temperature === null || temperature === 'unset') return getCSS('--unset');
     const domain = temperatureColourDomain();
     if (domain.min === null || domain.max === null) return getCSS('--extrude');
-    return tempPaletteColor((Number(temperature) - domain.min) / Math.max(0.000001, domain.max - domain.min));
+    return cachedColour('temp', temperature, () => tempPaletteColor((Number(temperature) - domain.min) / Math.max(0.000001, domain.max - domain.min)));
   }
 
   function updateKLegend() {
@@ -1550,42 +1622,85 @@
       `<div class="kLegendNote">${scaleText}${hasUnset ? ' Grey indicates extrusion before the first M104/M109 temperature command.' : ''}</div>`;
   }
 
-  function drawMoves(moves, alpha=1, isIso=false) {
+  function segmentVisible(a, b, width, height) {
+    const margin = 24;
+    return !(Math.max(a[0], b[0]) < -margin || Math.min(a[0], b[0]) > width + margin ||
+             Math.max(a[1], b[1]) < -margin || Math.min(a[1], b[1]) > height + margin);
+  }
+
+  function appendSegment(path, a, b) {
+    path.moveTo(a[0], a[1]);
+    path.lineTo(b[0], b[1]);
+  }
+
+  function drawMoves(moves, alpha=1, isIso=false, start=0, end=moves.length, predicate=null, stride=1) {
+    const drawExtrusions = showExtrude.checked;
+    const drawTravels = showTravel.checked;
+    if (!drawExtrusions && !drawTravels) return;
     const extrudeColour = getCSS('--extrude');
     const travelColour = getCSS('--travel');
+    const perMoveExtrusion = drawExtrusions && (colorK.checked || colorTemp.checked || colorSpeed.checked || realLineWidth.checked);
+    const travelPath = drawTravels ? new Path2D() : null;
+    const extrusionPath = drawExtrusions && !perMoveExtrusion ? new Path2D() : null;
+    const styledPaths = perMoveExtrusion ? new Map() : null;
+    const r = wrap.getBoundingClientRect();
+    const first = Math.max(0, start | 0);
+    const last = Math.min(moves.length, end == null ? moves.length : end);
+    const step = Math.max(1, stride | 0);
+    let travelCount = 0, extrusionCount = 0;
+
+    for (let i = first; i < last; i += step) {
+      const m = moves[i];
+      if (predicate && !predicate(m)) continue;
+      if (m.extrude ? !drawExtrusions : !drawTravels) continue;
+      const a = isIso ? isoToScreen(m.x1, m.y1, m.z1) : worldToScreen(m.x1, m.y1);
+      const b = isIso ? isoToScreen(m.x2, m.y2, m.z2) : worldToScreen(m.x2, m.y2);
+      if (!segmentVisible(a, b, r.width, r.height)) {
+        renderState.skipped++;
+        continue;
+      }
+      renderState.drawn++;
+      if (!m.extrude) {
+        appendSegment(travelPath, a, b);
+        travelCount++;
+      } else if (!perMoveExtrusion) {
+        appendSegment(extrusionPath, a, b);
+        extrusionCount++;
+      } else {
+        const style = colourForMove(m);
+        const lineWidth = extrusionStrokeWidth(m);
+        const styleKey = `${style}|${lineWidth}`;
+        let path = styledPaths.get(styleKey);
+        if (!path) {
+          path = { path: new Path2D(), style, lineWidth };
+          styledPaths.set(styleKey, path);
+        }
+        appendSegment(path.path, a, b);
+        extrusionCount++;
+      }
+    }
 
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-
-    for (const type of ['travel','extrude']) {
-      if (type === 'extrude' && !showExtrude.checked) continue;
-      if (type === 'travel' && !showTravel.checked) continue;
-
-      const filtered = moves.filter(m => type === 'extrude' ? m.extrude : !m.extrude);
-      if (!filtered.length) continue;
-
-      ctx.globalAlpha = type === 'travel' ? alpha * 0.42 : alpha;
-      ctx.lineWidth = type === 'travel' ? 1 : fixedExtrusionStrokeWidth();
-      ctx.strokeStyle = type === 'travel' ? travelColour : extrudeColour;
-
-      const needsPerMoveExtrusion = type === 'extrude' && (colorK.checked || colorTemp.checked || colorSpeed.checked || realLineWidth.checked);
-      if (needsPerMoveExtrusion) {
-        for (const m of filtered) {
-          ctx.lineWidth = extrusionStrokeWidth(m);
-          if (colorK.checked) drawSingleMove(m, kColor(m.k), isIso);
-          else if (colorTemp.checked) drawSingleMove(m, tempColor(m.temperature), isIso);
-          else if (colorSpeed.checked) drawSingleMove(m, speedColor((m.nominalSpeed || ((m.f || 0) / 60)) * 60), isIso);
-          else drawSingleMove(m, extrudeColour, isIso);
+    if (travelCount) {
+      ctx.globalAlpha = alpha * 0.42;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = travelColour;
+      ctx.stroke(travelPath);
+    }
+    if (extrusionCount) {
+      ctx.globalAlpha = alpha;
+      if (perMoveExtrusion) {
+        for (const rendered of styledPaths.values()) {
+          ctx.lineWidth = rendered.lineWidth;
+          ctx.strokeStyle = rendered.style;
+          ctx.stroke(rendered.path);
         }
       } else {
-        ctx.beginPath();
-        for (const m of filtered) {
-          const a = isIso ? isoToScreen(m.x1,m.y1,m.z1) : worldToScreen(m.x1,m.y1);
-          const b = isIso ? isoToScreen(m.x2,m.y2,m.z2) : worldToScreen(m.x2,m.y2);
-          ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
-        }
-        ctx.stroke();
+        ctx.lineWidth = fixedExtrusionStrokeWidth();
+        ctx.strokeStyle = extrudeColour;
+        ctx.stroke(extrusionPath);
       }
     }
     ctx.restore();
@@ -1597,7 +1712,7 @@
 
   function realisticExtrusionStrokeWidth(m) {
     const widthMm = Number.isFinite(m.lineWidthMm) ? m.lineWidthMm : 0.4;
-    return Math.max(0.25, Math.min(80, widthMm * view.scale));
+    return Math.round(Math.max(0.25, Math.min(80, widthMm * view.scale)) * 4) / 4;
   }
 
   function extrusionStrokeWidth(m) {
@@ -1710,19 +1825,25 @@
     ctx.restore();
   }
 
+  function overviewStride(segmentCount, viewMode) {
+    if (!fastOverview.checked || viewMode === 'layer') return 1;
+    return Math.max(1, Math.ceil(segmentCount / MAX_OVERVIEW_SEGMENTS));
+  }
+
   function drawPlayback(isIso) {
     const index = findPlaybackMoveIndex(playback.timeS);
-    const completedAll = data.moves.slice(0, index);
     const current = data.moves[index];
-    let completed = completedAll;
-
+    let predicate = null;
     if (mode.value === 'layer') {
-      completed = completedAll.filter(m => m.layer === selectedLayer);
+      const currentLayer = selectedLayer;
+      predicate = m => m.layer === currentLayer;
     } else if (mode.value === 'upToLayer') {
-      completed = completedAll.filter(m => m.layer <= selectedLayer);
+      const visibleLayer = selectedLayer;
+      predicate = m => m.layer <= visibleLayer;
     }
-
-    if (completed.length) drawMoves(completed, 1, isIso);
+    const stride = overviewStride(index, mode.value);
+    renderState.stride = stride;
+    if (index > 0) drawMoves(data.moves, 1, isIso, 0, index, predicate, stride);
 
     if (current && current.durationS > 0 && playback.timeS >= current.startTimeS) {
       const fraction = progressFractionForMove(current, playback.timeS - current.startTimeS);
@@ -1735,8 +1856,8 @@
         current.k,
         current.temperature
       );
-    } else if (completedAll.length) {
-      const last = completedAll[completedAll.length - 1];
+    } else if (index > 0) {
+      const last = data.moves[index - 1];
       drawNozzleMarker(last.x2, last.y2, last.z2, isIso, last.k, last.temperature);
     } else if (current) {
       drawNozzleMarker(current.x1, current.y1, current.z1, isIso, current.k, current.temperature);
@@ -1794,22 +1915,39 @@
     const r = wrap.getBoundingClientRect();
     ctx.clearRect(0, 0, r.width, r.height);
     if (!data) return;
+    if (realLineWidth.checked) ensureLineWidths();
+    renderState.stride = 1;
+    renderState.skipped = 0;
+    renderState.drawn = 0;
 
     if (mode.value !== 'iso') drawGrid();
 
     if (playback.active) {
       drawPlayback(mode.value === 'iso');
     } else if (mode.value === 'all') {
-      drawMoves(data.moves, 1, false);
+      const stride = overviewStride(data.moves.length, mode.value);
+      renderState.stride = stride;
+      drawMoves(data.moves, 1, false, 0, data.moves.length, null, stride);
     } else if (mode.value === 'upToLayer') {
-      for (let i = 0; i <= selectedLayer; i++) {
-        const alpha = fadeOld.checked ? (0.12 + 0.88 * (i / Math.max(1, selectedLayer))) : 1;
-        drawMoves(data.layers[i]?.moves || [], alpha, false);
+      const candidateCount = data.layers.slice(0, selectedLayer + 1).reduce((sum, layer) => sum + (layer?.moves.length || 0), 0);
+      const stride = overviewStride(candidateCount, mode.value);
+      renderState.stride = stride;
+      if (!fadeOld.checked) {
+        const visibleLayer = selectedLayer;
+        drawMoves(data.moves, 1, false, 0, data.moves.length, m => m.layer <= visibleLayer, stride);
+      } else {
+        for (let i = 0; i <= selectedLayer; i++) {
+          const alpha = 0.12 + 0.88 * (i / Math.max(1, selectedLayer));
+          drawMoves(data.layers[i]?.moves || [], alpha, false, 0, undefined, null, stride);
+        }
       }
     } else if (mode.value === 'iso') {
+      const candidateCount = data.layers.slice(0, selectedLayer + 1).reduce((sum, layer) => sum + (layer?.moves.length || 0), 0);
+      const stride = overviewStride(candidateCount, mode.value);
+      renderState.stride = stride;
       for (let i = 0; i <= selectedLayer; i++) {
         const alpha = fadeOld.checked ? (0.08 + 0.92 * (i / Math.max(1, selectedLayer))) : 1;
-        drawMoves(data.layers[i]?.moves || [], alpha, true);
+        drawMoves(data.layers[i]?.moves || [], alpha, true, 0, undefined, null, stride);
       }
     } else {
       drawMoves(data.layers[selectedLayer]?.moves || [], 1, false);
@@ -1822,12 +1960,13 @@
     if (!data) return;
     const r = wrap.getBoundingClientRect();
     const l = data.layers[selectedLayer] || {};
-    const visibleK = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
-    const visibleTemps = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
+    const visibleK = l.kValues || [];
+    const visibleTemps = l.temps || [];
     const summaryLine = `Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves`;
     const values = [];
     if (visibleK.length) values.push(`K ${compactValueSummary(visibleK, formatK)}`);
     if (visibleTemps.length) values.push(`Nozzle ${compactValueSummary(visibleTemps, formatTemp)}`);
+    if (renderState.stride > 1) values.push(`Fast overview: 1/${renderState.stride} segments rendered`);
     const valuesLine = values.join('  |  ');
     const playbackLine = playback.active
       ? `${playback.playing ? 'PLAYING' : (playback.timeS >= data.estimatedSeconds ? 'COMPLETE' : 'PAUSED')}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×  |  ${data.timingMode}`
@@ -1972,7 +2111,11 @@
     draw();
   });
   mode.addEventListener('change', resetView);
-  [showExtrude, showTravel, showGrid, fadeOld, realLineWidth].forEach(el => el.addEventListener('change', draw));
+  [showExtrude, showTravel, showGrid, fadeOld, fastOverview].forEach(el => el.addEventListener('change', draw));
+  realLineWidth.addEventListener('change', () => {
+    if (realLineWidth.checked) ensureLineWidths();
+    draw();
+  });
   colorSpeed.addEventListener('change', () => {
     if (colorSpeed.checked) {
       colorK.checked = false;
@@ -2001,10 +2144,12 @@
     draw();
   });
   kPalette.addEventListener('change', () => {
+    clearColourCaches();
     updateKLegend();
     draw();
   });
   tempPalette.addEventListener('change', () => {
+    clearColourCaches();
     updateTempLegend();
     draw();
   });
@@ -2013,7 +2158,10 @@
   [fallbackPrintAccel, fallbackTravelAccel, fallbackXJerk, fallbackYJerk, fallbackZJerk].forEach(el => {
     el.addEventListener('change', rebuildMotionTiming);
   });
-  searchInput.addEventListener('input', updateSearch);
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(updateSearch, 120);
+  });
 
   wrap.addEventListener('dragenter', e => { e.preventDefault(); drop.style.display = 'flex'; });
   wrap.addEventListener('dragover', e => { e.preventDefault(); drop.style.display = 'flex'; });
@@ -2034,7 +2182,7 @@
     view.ox += e.clientX - lastMouse.x;
     view.oy += e.clientY - lastMouse.y;
     lastMouse = { x:e.clientX, y:e.clientY };
-    draw();
+    scheduleDraw();
   });
   canvas.addEventListener('wheel', e => {
     if (!data) return;
@@ -2049,7 +2197,7 @@
     view.scale = Math.max(0.02, Math.min(250, view.scale));
     view.ox = mx - beforeX * view.scale;
     view.oy = my + beforeY * view.scale;
-    draw();
+    scheduleDraw();
   }, { passive:false });
 
   window.addEventListener('resize', fitCanvas);
