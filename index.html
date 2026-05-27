@@ -525,6 +525,8 @@
         <code>M900 K…</code> values as a smooth colour ramp, or enable
         <strong>Colour extrusion by nozzle temperature</strong> to show the most recent commanded nozzle
         target from <code>M104 S…</code> and <code>M109 S…/R…</code> on each extrusion move.
+        Temperature towers are auto-scaled across the temperatures actually extruded; when a file only prints
+        at one nozzle temperature, a fixed 170–270&nbsp;°C reference scale is used so hot prints do not appear neutral.
         These modes are designed for height-varying test prints. Choose a palette above, and use
         <strong>All layers</strong> or <strong>3D-ish preview</strong> to see the gradient through the print.
         Playback can also simulate Marlin-style acceleration and Classic Jerk timing. In <strong>3D-ish preview</strong>, the printer origin <code>(0,0,0)</code> is oriented at the front/lower-left, with +X to the right and +Y towards the rear.
@@ -790,9 +792,10 @@
         currentK = p.K;
         kChanges.push({ k: currentK, line: i + 1, layer: currentLayer, raw });
       }
-      else if ((cmd === 'M104' || cmd === 'M109') && (('S' in p) || ('R' in p))) {
+      else if ((cmd === 'M104' && 'S' in p) || (cmd === 'M109' && (('S' in p) || ('R' in p)))) {
+        // M104 uses S; M109 may use S (heat only) or R (heat/cool and wait).
         const requestedTemp = ('S' in p) ? p.S : p.R;
-        if (Number.isFinite(requestedTemp)) {
+        if (Number.isFinite(requestedTemp) && requestedTemp >= 0) {
           currentNozzleTemp = requestedTemp;
           tempChanges.push({ temperature: currentNozzleTemp, command: cmd, line: i + 1, layer: currentLayer, raw });
         }
@@ -1260,14 +1263,25 @@
     return `${sec}s`;
   }
 
+  function compactValueSummary(values, formatter) {
+    if (!values.length) return '';
+    if (values.length <= 3) return values.map(formatter).join(', ');
+    const numeric = values.filter(v => v !== 'unset' && Number.isFinite(Number(v))).map(Number);
+    if (!numeric.length) return 'Not set';
+    let min = numeric[0], max = numeric[0];
+    for (const value of numeric) { min = Math.min(min, value); max = Math.max(max, value); }
+    const range = min === max ? formatter(min) : `${formatter(min)} → ${formatter(max)}`;
+    return `${range} (${values.length} values)`;
+  }
+
   function updateLayerText() {
     if (!data) { layerText.textContent = '—'; return; }
     const l = data.layers[selectedLayer];
     const z = l && l.z != null ? ` Z ${l.z.toFixed(3)} mm` : '';
     const kValues = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
     const temps = [...new Set((l?.moves || []).filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
-    const k = kValues.length ? ` | K ${kValues.map(formatK).join(', ')}` : '';
-    const temp = temps.length ? ` | Nozzle ${temps.map(formatTemp).join(', ')}` : '';
+    const k = kValues.length ? ` | K ${compactValueSummary(kValues, formatK)}` : '';
+    const temp = temps.length ? ` | Nozzle ${compactValueSummary(temps, formatTemp)}` : '';
     layerText.textContent = `${selectedLayer + 1} / ${data.layers.length}${z}${k}${temp}`;
   }
 
@@ -1458,6 +1472,18 @@
     return colourFromStops(selectedTempPalette().stops, t);
   }
 
+  function temperatureColourDomain() {
+    if (!data || data.minTemp === null || data.maxTemp === null) {
+      return { min: null, max: null, isReferenceScale: false };
+    }
+    if (data.minTemp === data.maxTemp) {
+      // With one commanded print temperature, min=max cannot create a useful colour position.
+      // A reference range makes common PLA/PETG temperatures look appropriately warm/hot.
+      return { min: 170, max: 270, isReferenceScale: true };
+    }
+    return { min: data.minTemp, max: data.maxTemp, isReferenceScale: false };
+  }
+
   function kColor(k) {
     if (k === null || k === 'unset') return getCSS('--unset');
     if (!data || data.minK === null || data.maxK === null) return getCSS('--extrude');
@@ -1467,9 +1493,9 @@
 
   function tempColor(temperature) {
     if (temperature === null || temperature === 'unset') return getCSS('--unset');
-    if (!data || data.minTemp === null || data.maxTemp === null) return getCSS('--extrude');
-    if (data.maxTemp === data.minTemp) return tempPaletteColor(0.5);
-    return tempPaletteColor((Number(temperature) - data.minTemp) / (data.maxTemp - data.minTemp));
+    const domain = temperatureColourDomain();
+    if (domain.min === null || domain.max === null) return getCSS('--extrude');
+    return tempPaletteColor((Number(temperature) - domain.min) / Math.max(0.000001, domain.max - domain.min));
   }
 
   function updateKLegend() {
@@ -1509,15 +1535,19 @@
       tempLegend.innerHTML = `<span class="title">No commanded nozzle temperature is set on extrusion moves</span>`;
       return;
     }
-    const mid = data.minTemp + ((data.maxTemp - data.minTemp) / 2);
+    const domain = temperatureColourDomain();
+    const mid = domain.min + ((domain.max - domain.min) / 2);
     const rangeText = data.minTemp === data.maxTemp
-      ? formatTemp(data.minTemp)
-      : `${formatTemp(data.minTemp)} to ${formatTemp(data.maxTemp)}`;
+      ? `printing at ${formatTemp(data.minTemp)}`
+      : `print range ${formatTemp(data.minTemp)} to ${formatTemp(data.maxTemp)}`;
+    const scaleText = domain.isReferenceScale
+      ? `Reference colour scale ${formatTemp(domain.min)} to ${formatTemp(domain.max)} because only one print temperature is used.`
+      : `Colour scale auto-fitted to the printed temperature range.`;
     tempLegend.innerHTML =
-      `<span class="title">${selectedTempPalette().label}: nozzle target ${rangeText}</span>` +
+      `<span class="title">${selectedTempPalette().label}: ${rangeText}</span>` +
       `<div class="kGradient" style="background:${tempGradientCSS()}"></div>` +
-      `<div class="kScale"><span>${formatTemp(data.minTemp)}</span><span>${formatTemp(mid)}</span><span>${formatTemp(data.maxTemp)}</span></div>` +
-      `<div class="kLegendNote">${count.toLocaleString()} distinct commanded temperature${count === 1 ? '' : 's'} coloured continuously${hasUnset ? ' · Grey indicates extrusion before the first M104/M109 temperature command.' : '.'}</div>`;
+      `<div class="kScale"><span>${formatTemp(domain.min)}</span><span>${formatTemp(mid)}</span><span>${formatTemp(domain.max)}</span></div>` +
+      `<div class="kLegendNote">${scaleText}${hasUnset ? ' Grey indicates extrusion before the first M104/M109 temperature command.' : ''}</div>`;
   }
 
   function drawMoves(moves, alpha=1, isIso=false) {
@@ -1790,29 +1820,41 @@
 
   function drawOverlay() {
     if (!data) return;
-    ctx.save();
-    ctx.fillStyle = 'rgba(10,15,24,.68)';
-    ctx.strokeStyle = 'rgba(125,211,252,.18)';
-    ctx.lineWidth = 1;
-    roundRect(ctx, 14, 14, 302, playback.active ? 92 : 72, 12);
-    ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#e8eef9';
-    ctx.font = '700 13px system-ui, sans-serif';
-    ctx.fillText(data.fileName || 'G-code', 28, 38);
-    ctx.fillStyle = '#9aa7bd';
-    ctx.font = '12px system-ui, sans-serif';
+    const r = wrap.getBoundingClientRect();
     const l = data.layers[selectedLayer] || {};
     const visibleK = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.k === null ? 'unset' : m.k))];
     const visibleTemps = [...new Set((l.moves || []).filter(m => m.extrude).map(m => m.temperature === null ? 'unset' : m.temperature))];
-    const kSummary = visibleK.length ? `  |  K ${visibleK.map(formatK).join(', ')}` : '';
-    const tempSummary = visibleTemps.length ? `  |  Nozzle ${visibleTemps.map(formatTemp).join(', ')}` : '';
-    ctx.fillText(`Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves${kSummary}${tempSummary}`, 28, 58);
-    if (playback.active) {
-      const state = playback.playing ? 'PLAYING' : (playback.timeS >= data.estimatedSeconds ? 'COMPLETE' : 'PAUSED');
-      ctx.fillText(`${state}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×  |  ${data.timingMode}`, 28, 76);
-      ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 94);
-    } else {
-      ctx.fillText(`Wheel: zoom   Drag: pan`, 28, 76);
+    const summaryLine = `Layer ${selectedLayer + 1}/${data.layers.length}  |  ${l.moves?.length || 0} moves`;
+    const values = [];
+    if (visibleK.length) values.push(`K ${compactValueSummary(visibleK, formatK)}`);
+    if (visibleTemps.length) values.push(`Nozzle ${compactValueSummary(visibleTemps, formatTemp)}`);
+    const valuesLine = values.join('  |  ');
+    const playbackLine = playback.active
+      ? `${playback.playing ? 'PLAYING' : (playback.timeS >= data.estimatedSeconds ? 'COMPLETE' : 'PAUSED')}  ${clockText(playback.timeS)} / ${clockText(data.estimatedSeconds)}  |  ${playback.speed}×  |  ${data.timingMode}`
+      : 'Wheel: zoom   Drag: pan';
+    const controlsLine = playback.active ? 'Wheel: zoom   Drag: pan' : '';
+    const lines = [data.fileName || 'G-code', summaryLine, valuesLine, playbackLine, controlsLine].filter(Boolean);
+    const overlayHeight = 22 + lines.length * 18;
+
+    ctx.save();
+    let widest = 0;
+    for (let i = 0; i < lines.length; i++) {
+      ctx.font = i === 0 ? '700 13px system-ui, sans-serif' : '12px system-ui, sans-serif';
+      widest = Math.max(widest, ctx.measureText(lines[i]).width);
+    }
+    const overlayWidth = Math.min(Math.max(302, widest + 28), Math.max(302, r.width - 28));
+    ctx.fillStyle = 'rgba(10,15,24,.68)';
+    ctx.strokeStyle = 'rgba(125,211,252,.18)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, 14, 14, overlayWidth, overlayHeight, 12);
+    ctx.fill(); ctx.stroke();
+    ctx.beginPath();
+    ctx.rect(22, 20, Math.max(0, overlayWidth - 16), overlayHeight - 10);
+    ctx.clip();
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillStyle = i === 0 ? '#e8eef9' : '#9aa7bd';
+      ctx.font = i === 0 ? '700 13px system-ui, sans-serif' : '12px system-ui, sans-serif';
+      ctx.fillText(lines[i], 28, 38 + i * 18);
     }
     ctx.restore();
   }
